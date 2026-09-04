@@ -1,0 +1,15 @@
+# 依赖：本目录是 Windows junction，指向本机 ~/.dsh/profiles/node_modules/@deepseek-ai。
+# 绝不能提交——会把指向 C 盘的链接当内容入库。clone 到新机器后按 README「本机开发」重建。
+node_modules/
+
+# 本地开发专属文件：含本机绝对路径，不发布
+dev/
+.local/
+
+# 临时与残留
+*.tmp
+*.tsbuildinfo
+.DELETE.*
+coverage/
+test-out.txt
+test-err.txt
