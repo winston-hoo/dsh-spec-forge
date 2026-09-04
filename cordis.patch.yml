@@ -1,0 +1,12 @@
+- insert:
+    - id: spec-forge
+      name: dsh-spec-forge
+      config:
+        autoRecall: true
+        autoRetro: true
+        matchThreshold: 0.35
+        maxInjectTemplates: 2
+        injectMaxChars: 4000
+        defaultScope: project
+        retroMinToolCalls: 2
+        strictDistill: true
