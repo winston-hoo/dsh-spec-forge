@@ -6,6 +6,7 @@ import {
   WEIGHT_TECH,
   extractPaths,
   fingerprint,
+  inferQueryTags,
   normalize,
   segmentChinese,
   splitIdentifier,
@@ -92,4 +93,37 @@ test('fingerprint：同类需求产生相近指纹', () => {
   const b = tokenize('添加一个支持分页的查询接口')
   const inter = [...a.keys()].filter((k) => b.has(k))
   assert.ok(inter.length >= 3, `同类需求应共享多个 token，实际 ${inter.join(',')}`)
+})
+
+// ---------- 查询侧标签推断（0.3.1） ----------
+
+test('inferQueryTags：保留带连字符的复合技术词整体', () => {
+  const tags = inferQueryTags('在 Vue 管理页用 a-switch 给表单加开关字段')
+  assert.ok(tags.includes('a-switch'), '应保留 a-switch 整体，实际：' + tags.join(', '))
+})
+
+test('inferQueryTags：抽取路径片段（末段文件名与有效目录名）', () => {
+  const tags = inferQueryTags('修改 src/views/propertyStaff/index.vue 这个页面')
+  assert.ok(tags.includes('index'), '应取末段文件名（去扩展名）')
+  assert.ok(tags.includes('propertystaff'), '应取非噪声目录名')
+  assert.ok(!tags.includes('views'), '噪声目录应被排除')
+})
+
+test('inferQueryTags：识别技术词与中文技术词', () => {
+  const tags = inferQueryTags('在 vue 管理页给列表加 a-switch，表单也要改')
+  assert.ok(tags.includes('vue'), '技术词 vue 应被识别，实际：' + tags.join(', '))
+  assert.ok(tags.some((t) => ['表单', '列表'].includes(t)), '中文技术词应被识别')
+})
+
+test('inferQueryTags：结果数量不超过上限（避免稀释 jaccard 分母）', () => {
+  const tags = inferQueryTags(
+    '改造 src/views/user/UserOrderController.java 的分页查询接口，配合 mybatis-plus 做筛选排序导出导入'
+  )
+  assert.ok(tags.length <= 8, '标签数应 <= 8，实际 ' + tags.length)
+  assert.ok(tags.length > 0)
+})
+
+test('inferQueryTags：空输入返回空数组', () => {
+  assert.deepEqual(inferQueryTags(''), [])
+  assert.deepEqual(inferQueryTags(null), [])
 })

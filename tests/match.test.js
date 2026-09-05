@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { fingerprint, toWeightMap } from '../lib/fingerprint.js'
+import { fingerprint, inferQueryTags, toWeightMap } from '../lib/fingerprint.js'
 import { cosine, coverage, jaccard, popularity, rankTemplates, recency, scoreTemplate } from '../lib/match.js'
 
 const NOW = Date.parse('2026-09-04T00:00:00Z')
@@ -130,4 +130,46 @@ test('toWeightMap：兼容数组与 Map 两种输入', () => {
   assert.deepEqual(toWeightMap(arr), new Map([['a', 2]]))
   const m = new Map([['b', 1]])
   assert.equal(toWeightMap(m), m)
+})
+
+test('scoreTemplate：查询侧标签重叠带来加成（0.3.1 接线修复）', () => {
+  const template = {
+    id: 'tpl-dddddddddd',
+    category: 'frontend/component',
+    tags: ['vue', 'a-switch', 'form'],
+    fingerprint: fingerprint('Vue 管理页表单加开关字段'),
+    hitCount: 0,
+  }
+  const term = '在 Vue 管理页用 a-switch 给表单加一个开关字段'
+  const base = fingerprint(term)
+
+  // 修复前：queryFp 是纯数组，无 tags → 标签重叠恒为 0
+  const before = scoreTemplate({ queryFp: base, template, now: NOW })
+
+  // 修复后：查询侧推断出 tags 并附加
+  const withTags = fingerprint(term)
+  withTags.tags = inferQueryTags(term)
+  const after = scoreTemplate({ queryFp: withTags, template, now: NOW })
+
+  assert.ok(inferQueryTags(term).includes('a-switch'), '应保留 a-switch 这种连字符复合词')
+  assert.equal(before.breakdown.tagOverlap, 0, '未接线时标签重叠为 0')
+  assert.ok(after.breakdown.tagOverlap > 0, '接线后标签重叠应大于 0')
+  assert.ok(after.score > before.score, `接线后得分应提升：${before.score} -> ${after.score}`)
+})
+
+test('scoreTemplate：一级分类相同即计同分类（二级自由填写）', () => {
+  const template = {
+    id: 'tpl-eeeeeeeeee',
+    category: 'frontend/component',
+    tags: [],
+    fingerprint: fingerprint('Vue 管理页表单'),
+    hitCount: 0,
+  }
+  const qp = fingerprint('Vue 管理页表单')
+  qp.category = 'frontend/pagination' // 一级相同、二级不同
+  assert.equal(scoreTemplate({ queryFp: qp, template, now: NOW }).breakdown.sameCategory, 1)
+
+  const qp2 = fingerprint('Vue 管理页表单')
+  qp2.category = 'bugfix/null' // 一级不同
+  assert.equal(scoreTemplate({ queryFp: qp2, template, now: NOW }).breakdown.sameCategory, 0)
 })

@@ -12,6 +12,7 @@ import {
   extractFieldName,
   extractFilePath,
   inferFieldComponent,
+  inferQueryCategory,
 } from '../lib/classify.js'
 
 test('SKIP_TRIGGERS：包含六个常用跳过词', () => {
@@ -159,4 +160,26 @@ test('L1_DEFAULTS：包含三类保守默认（列表展示/校验/后端）', (
 
 test('L2_MAX_QUESTIONS：默认为 3', () => {
   assert.equal(L2_MAX_QUESTIONS, 3)
+})
+// ---------- 查询侧类别推断（0.3.1） ----------
+
+test('inferQueryCategory：报错类需求判为 bugfix', () => {
+  assert.equal(inferQueryCategory('模块加载失败，控制台报 error 堆栈'), 'bugfix')
+})
+
+test('inferQueryCategory：重构迁移类判为 refactor', () => {
+  assert.equal(inferQueryCategory('把用户模块重构拆分为独立服务'), 'refactor')
+})
+
+test('inferQueryCategory：前端页面组件类判为 frontend', () => {
+  assert.equal(inferQueryCategory('在 Vue 管理页面给新增弹窗表单加一个开关字段'), 'frontend')
+})
+
+test('inferQueryCategory：后端接口类判为 feature', () => {
+  assert.equal(inferQueryCategory('在 UserController 新增一个分页查询接口'), 'feature')
+})
+
+test('inferQueryCategory：判不出来返回 undefined（宁可不加分）', () => {
+  assert.equal(inferQueryCategory(''), undefined)
+  assert.equal(inferQueryCategory('随便聊聊天气'), undefined)
 })
