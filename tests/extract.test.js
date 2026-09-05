@@ -4,11 +4,13 @@ import assert from 'node:assert/strict'
 import {
   buildRetroDigest,
   collectPaths,
+  evaluateRetroEligibility,
   extractSessionFacts,
   getEvents,
   isSessionComplete,
   messageText,
   parseToolArgs,
+  WRITE_TOOL_NAMES,
 } from '../lib/extract.js'
 
 /** 构造一个会话：envelope 自动补 seq */
@@ -213,4 +215,92 @@ test('buildRetroDigest：超长内容被截断', () => {
   const digest = buildRetroDigest(COMPLETE_SESSION, 100)
   assert.ok(digest.length <= 100 + 20)
   assert.ok(digest.includes('已截断'))
+})
+
+// ---------- 沉淀门槛判定（第一层硬过滤） ----------
+
+test('WRITE_TOOL_NAMES：识别常见改码工具名（含 _file 别名）', () => {
+  for (const name of ['edit', 'write', 'edit_file', 'write_file', 'patch', 'apply_patch']) {
+    assert.ok(WRITE_TOOL_NAMES.has(name), `${name} 应在写工具集合内`)
+  }
+  for (const name of ['read', 'read_file', 'grep', 'glob', 'ls', 'search', 'spec_recall', 'bash']) {
+    assert.ok(!WRITE_TOOL_NAMES.has(name), `${name} 不应误判为写工具`)
+  }
+})
+
+test('extractSessionFacts：统计真实改码（writeToolCalls/codeChanged）', () => {
+  const facts = extractSessionFacts(COMPLETE_SESSION)
+  // COMPLETE_SESSION 含一次 edit_file，read_file 不计
+  assert.equal(facts.writeToolCalls, 1)
+  assert.equal(facts.codeChanged, true)
+})
+
+test('extractSessionFacts：只读会话 codeChanged=false', () => {
+  const session = makeSession([
+    { type: 'turn/start', data: {} },
+    USER('这个报错什么意思？'),
+    TOOL_CALL('read_file', { path: 'a.java' }),
+    TOOL_RESULT(),
+    TOOL_CALL('grep', { pattern: 'foo' }),
+    TOOL_RESULT(),
+    ASSISTANT('这是 NPE，空指针。'),
+    { type: 'turn/end', data: { kind: 'completed' } },
+  ])
+  const facts = extractSessionFacts(session)
+  assert.equal(facts.codeChanged, false)
+  assert.equal(facts.writeToolCalls, 0)
+})
+
+test('evaluateRetroEligibility：真实改码且达到工具数下限 → 有资格沉淀', () => {
+  const facts = extractSessionFacts(COMPLETE_SESSION)
+  const gate = evaluateRetroEligibility(facts, { minToolCalls: 2, requireCodeChange: true })
+  assert.equal(gate.eligible, true)
+  assert.deepEqual(gate.reasons, [])
+})
+
+test('evaluateRetroEligibility：只读诊断被 no-code-change 拦下', () => {
+  const session = makeSession([
+    { type: 'turn/start', data: {} },
+    USER('这个报错什么意思？'),
+    TOOL_CALL('grep', { pattern: 'foo' }),
+    TOOL_RESULT(),
+    ASSISTANT('这是配置问题。'),
+    { type: 'turn/end', data: { kind: 'completed' } },
+  ])
+  const gate = evaluateRetroEligibility(extractSessionFacts(session), { minToolCalls: 1, requireCodeChange: true })
+  assert.equal(gate.eligible, false)
+  assert.ok(gate.reasons.includes('no-code-change'))
+})
+
+test('evaluateRetroEligibility：工具调用数低于下限被拦下', () => {
+  const session = makeSession([
+    { type: 'turn/start', data: {} },
+    USER('改一行配置'),
+    TOOL_CALL('edit_file', { path: '.env' }),
+    TOOL_RESULT(),
+    ASSISTANT('改好了。'),
+    { type: 'turn/end', data: { kind: 'completed' } },
+  ])
+  const gate = evaluateRetroEligibility(extractSessionFacts(session), { minToolCalls: 5, requireCodeChange: true })
+  assert.equal(gate.eligible, false)
+  assert.ok(gate.reasons.includes('tool-calls-below-5'))
+})
+
+test('evaluateRetroEligibility：requireCodeChange=false 时只读也过门槛', () => {
+  const session = makeSession([
+    { type: 'turn/start', data: {} },
+    USER('排查一下'),
+    TOOL_CALL('grep', { pattern: 'x' }),
+    TOOL_RESULT(),
+    ASSISTANT('查完了'),
+    { type: 'turn/end', data: { kind: 'completed' } },
+  ])
+  const gate = evaluateRetroEligibility(extractSessionFacts(session), { minToolCalls: 1, requireCodeChange: false })
+  assert.equal(gate.eligible, true)
+})
+
+test('evaluateRetroEligibility：sessionComplete=false 直接拒绝', () => {
+  const gate = evaluateRetroEligibility({ toolCallCount: 5, writeToolCalls: 2, codeChanged: true }, { sessionComplete: false })
+  assert.equal(gate.eligible, false)
+  assert.ok(gate.reasons.includes('session-not-complete'))
 })
