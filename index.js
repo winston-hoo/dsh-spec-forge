@@ -244,7 +244,7 @@ export function apply(ctx, config) {
             ready: { type: 'boolean', required: true },
             report: { type: 'string', required: true },
             questions: { type: 'array' },
-            classification: { type: 'object' },
+            classification: { type: 'object', additionalProperties: true },
           },
         },
         render: (_args, value) => [{ type: 'text', text: value.report }],

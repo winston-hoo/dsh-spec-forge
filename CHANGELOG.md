@@ -3,6 +3,19 @@
 本插件锁定目标 dsh 版本：`@deepseek-ai/dsh` 0.1.x（developer preview，API 可能有破坏性变更）。
 兼容性以实际安装的 profile 依赖树为准。
 
+## 0.2.1 — 2026-09-05
+
+### 修复（阻断性 Bug）
+
+- **修复 `dsh web` / harness 启动崩溃**：`spec_triage` 工具 output schema 中的 `classification` 字段写成了 `{ type: 'object' }`，缺少 `additionalProperties: true`，违反 dsh schema 编译器要求（object 类型必须显式声明 true/false），导致启动时抛 `UNSUPPORTED_SCHEMA: schema.properties.classification.additionalProperties must be explicitly true or false`，整个插件树加载失败。
+- 修复位置：`index.js` `spec_triage` output schema（顶层 schema 及所有嵌套 object 字段均需显式 `additionalProperties`，v0.1.0 已知坑在 0.2.0 引入新字段时复发）。
+- 已全量排查：其余 5 个工具的顶层 schema 均带 `additionalProperties: true`，无其他 object 类型隐患。
+
+### 验证
+
+- 单元测试 109/109 通过
+- `pnpm dsh web`（deepseek-harness 开发模式）成功启动，web 服务在 `http://127.0.0.1:3080/` 正常监听，schema 错误消失
+
 ## 0.2.0 — 2026-09-05
 
 按用户反馈治理"教条式追问"，新增 **3 级复杂度分级响应**。
