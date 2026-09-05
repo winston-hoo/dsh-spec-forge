@@ -149,6 +149,7 @@ dsh --profile web --dump-config | grep spec-forge   # 确认在插件树里
 | `injectMaxChars`     | `4000`    | 注入上下文的最大字符数                             |
 | `defaultScope`       | `project` | 沉淀默认落在项目层还是全局层                       |
 | `retroMinToolCalls`  | `2`       | 自动复盘要求的最少工具调用次数                     |
+| `retroRequireCodeChange` | `true` | 沉淀提醒要求会话真实改过代码（有 edit/write），纯问答/只读诊断不提示 |
 | `strictDistill`      | `true`    | 提炼时是否强制要求填写禁区                         |
 | `storageHome`        | 空        | 自定义数据目录，留空用 `$DSH_HOME/spec-forge`      |
 
@@ -222,7 +223,7 @@ $DSH_HOME/spec-forge/
 ## 验证
 
 ```bash
-# 单元测试：109 个用例，覆盖指纹/匹配/会话提取/存储/渲染/分类器/L1/L2/L3 报告/急停规则
+# 单元测试：117 个用例，覆盖指纹/匹配/会话提取/存储/渲染/分类器/L1/L2/L3 报告/急停规则/沉淀门槛
 npm test
 
 # 端到端冒烟：验证沉淀→召回→复用→禁区生效整条链路
@@ -257,15 +258,18 @@ npm run verify
 ## ⚠️ 已知限制与风险
 
 1. **dsh 仍是开发者预览版**，官方明确警告会有破坏性变更。本插件锁定的 API 面为：
-   `ctx.tools.register` / `ctx.get('systemPrompt')` / `ctx.get('skills')` / `ctx.on('turn/end')` /
-   `exec.agent.session`。升级 dsh 后若插件失效，先跑 `--dump-config` 排查，再看 CHANGELOG。
+   `ctx.tools.register` / `ctx.get('systemPrompt')` / `ctx.get('skills')` /
+   `exec.agent.session`（0.3.0 起不再依赖 `ctx.on('turn/end')`，该事件不含 session 事件流）。
+   升级 dsh 后若插件失效，先跑 `--dump-config` 排查，再看 CHANGELOG。
 
 2. **匹配用的是加权关键词指纹，不是向量检索。** 好处是零依赖、零成本、可解释；
    代价是对「说法完全不同但语义相同」的需求召回有限。调低 `matchThreshold` 可缓解，
    但会引入误召回。
 
-3. **自动复盘依赖模型主动调用 `spec_retro`。** 插件做了三层保障（常驻提示、Skill 说明书、
-   漏调时下次召回会提醒），但模型理论上仍可能漏掉。发现漏沉淀时，直接说「把这次沉淀成模板」即可。
+3. **沉淀时机有取舍，最终仍由模型决定调不调 `spec_retro`。** 插件做的是三层过滤：
+   硬门槛（只读/纯问答自动不提醒，`evaluateRetroEligibility`）、复用价值三问（SKILL 规则）、
+   合并沉淀（任务链收尾一次）。漏掉时下次 `spec_recall` 会真实提醒（0.3.0 修复了旧版兜底
+   因 turn/end 无事件流而永不触发的问题）。发现漏沉淀时，直接说「把这次沉淀成模板」即可。
 
 4. **「对话完整结束」是启发式判定**，依据是事件流结构（turn 完成 + 有工具活动 +
    用户消息已回应 + 无继续意图）。它判断得准，但不是绝对可靠。

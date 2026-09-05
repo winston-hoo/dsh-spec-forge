@@ -20,7 +20,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { fingerprint } from './lib/fingerprint.js'
 import { rankTemplates } from './lib/match.js'
-import { buildRetroDigest, extractSessionFacts, isSessionComplete } from './lib/extract.js'
+import { buildRetroDigest, evaluateRetroEligibility, extractSessionFacts, isSessionComplete } from './lib/extract.js'
 import {
   collectRedlines,
   dataRoot,
@@ -56,6 +56,7 @@ export const schema = Schema.object({
   defaultScope: Schema.union(['project', 'global']).default('project').description('沉淀默认落在项目层还是全局层'),
   storageHome: Schema.string().default('').description('自定义数据目录，留空则用 $DSH_HOME/spec-forge'),
   retroMinToolCalls: Schema.number().min(0).default(2).description('自动复盘要求的最少工具调用次数，低于此值视为未真正动手'),
+  retroRequireCodeChange: Schema.boolean().default(true).description('自动沉淀提醒要求本会话真实改过代码（有 edit/write 类工具调用），纯问答/只读诊断不提醒'),
   strictDistill: Schema.boolean().default(true).description('提炼提示词时是否强制要求填写禁区，空则报错'),
 })
 
@@ -67,8 +68,7 @@ export function apply(ctx, config) {
 
   // 会话级状态：只存标记位，不存内容，避免占用内存与持久化风险
   const state = {
-    pendingRetro: new Map(), // sessionId -> { reason, at }
-    retroDone: new Set(),
+    retroDone: new Set(), // sessionId：已成功沉淀过的会话，不再打扰
   }
 
   // ---------- 第 1 层：常驻系统提示词（必须短，控制在 200 token 内） ----------
@@ -96,7 +96,9 @@ export function apply(ctx, config) {
         '   read_file、read_dir、grep、glob、find、search、bash、ls、tree 一律不许碰。',
         '   即使你对项目一无所知，也必须先问（Level 2/3）或先动手（Level 1），不要预扫工作区。',
         '3. 需求明确后调用 `spec_distill` 生成结构化提示词，作为后续实现的执行依据。',
-        '4. 任务完成后调用 `spec_retro` 沉淀成模板。',
+        '4. 任务链真正收尾（改码完成且验证通过）后调用 `spec_retro` 沉淀成模板，一次即可，链内小修合并进最终那份。',
+        '   调用前过复用价值三问（下次是否还这么干/结论是否跨项目成立/用户是否会反复提）；',
+        '   纯问答、只读诊断、一次性改动不调；用户说"沉淀/总结/记到模板库"则必须调。',
         '禁区是硬约束：任何被标记为禁区的文件或行为，一律不得修改。',
       ].join('\n'),
     })
@@ -121,19 +123,10 @@ export function apply(ctx, config) {
   }
 
   // ---------- 第 3 层：兜底提醒（模型漏调 spec_retro 时提示） ----------
-
-  if (config.autoRetro) {
-    ctx.on('turn/end', (turn) => {
-      const sessionId = turn?.session?.id ?? turn?.sessionId ?? null
-      if (!sessionId) return
-      if (turn?.kind !== 'completed') return
-      if (state.retroDone.has(sessionId)) return
-      const facts = turn?.session ? extractSessionFacts(turn.session) : null
-      const toolCalls = facts?.toolCallCount ?? turn?.steps?.length ?? 0
-      if (toolCalls < config.retroMinToolCalls) return
-      state.pendingRetro.set(sessionId, { reason: 'turn-completed', at: Date.now() })
-    })
-  }
+  // 注意：dsh 的 turn/end 事件载荷不含 session 事件流（data 只有 {turn, reason}），
+  // 无法在此做沉淀门槛判定；旧版靠 turn.session/steps 的写法实际永远不触发。
+  // 兜底已改到 spec_recall execute 内用 exec.agent.session 惰性判定（见 buildRecallNotice），
+  // 每次召回时若发现「上一轮已完成且真实改过代码但尚未沉淀」，随召回结果附带一行提示。
 
   // ---------- 工具 1：召回 ----------
 
@@ -375,7 +368,7 @@ export function apply(ctx, config) {
     defineTool({
       name: 'spec_retro',
       description:
-        '会话任务完成后做归类总结并沉淀为模板。当一个编程任务已经完整结束（改动已完成、验证已通过、用户未提出新的修改要求）时调用。写入模板库后，下次遇到同类需求会被 spec_recall 自动召回。',
+        '任务链结束时做归类总结并沉淀为模板（供未来同类需求自动召回复用）。调用时机与取舍：1) 仅当一条任务链真正收尾——改动完成、验证通过、用户未提出新的修改要求——时调用一次，链内的小修小补不要中途反复调用，合并进最终那一份；2) 调用前先过复用价值三问：下次遇到同类需求是否还会照此做法？结论是否离了本项目仍成立？用户是否会反复提这类需求？三问任一为否则不调；3) 纯问答、只读诊断、一次性临时任务绝不调用；4) 用户明确要求沉淀（说"沉淀/总结/记到模板库"等）时无条件调用。写库后同类需求会被 spec_recall 自动召回。',
       parameters: {
         name: { type: 'string', required: true, description: '模板名称，一句话概括这类需求，如「Spring Boot 新增分页查询接口」' },
         category: { type: 'string', description: '分类，如 feature/api、bugfix/refactor、frontend/component，默认 uncategorized' },
@@ -472,7 +465,6 @@ export function apply(ctx, config) {
         const sessionId = exec?.agent?.session?.id
         if (sessionId) {
           state.retroDone.add(sessionId)
-          state.pendingRetro.delete(sessionId)
         }
 
         return {
@@ -569,9 +561,23 @@ function mergeList(existing, incoming) {
 
 function buildRecallNotice(exec, state, config) {
   if (!config.autoRetro) return ''
-  const sessionId = exec?.agent?.session?.id
-  if (!sessionId || !state.pendingRetro.has(sessionId)) return ''
-  return '提示：上一轮任务已完成但尚未沉淀。若那次任务有复用价值，请先调用 `spec_retro` 沉淀成模板，再开始本次需求。'
+  const session = exec?.agent?.session
+  const sessionId = session?.id
+  if (!sessionId || state.retroDone.has(sessionId)) return ''
+  // 用当前会话事件流实时做门槛判定（第一层硬过滤）：
+  // 会话至今改过代码且工具调用达到下限 → 说明有已完成任务可能未沉淀，提示一次。
+  const facts = extractSessionFacts(session)
+  const gate = evaluateRetroEligibility(facts, {
+    minToolCalls: config.retroMinToolCalls,
+    requireCodeChange: config.retroRequireCodeChange,
+  })
+  if (!gate.eligible) return ''
+  return (
+    '提示：本会话有已完成的编程任务但尚未沉淀为模板（检测到真实改码 ' +
+    `${gate.writeToolCalls} 次）。先过一遍复用价值三问（下次是否还这么干 / 结论是否` +
+    '跨项目成立 / 用户是否会反复提），有复用价值就先调用 `spec_retro` 沉淀成模板，' +
+    '再开始本次需求；确无复用价值可忽略并继续。'
+  )
 }
 
 function buildPreview(args) {

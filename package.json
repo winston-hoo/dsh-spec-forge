@@ -1,6 +1,6 @@
 {
   "name": "dsh-spec-forge",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "需求锻造：需求澄清、提示词提炼与经验沉淀。把模糊的编程需求锻造成可执行规格，并在每次任务完成后沉淀为可自动复用的个人提示词模板库。",
   "type": "module",
   "main": "index.js",

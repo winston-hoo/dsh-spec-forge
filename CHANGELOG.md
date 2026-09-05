@@ -3,6 +3,31 @@
 本插件锁定目标 dsh 版本：`@deepseek-ai/dsh` 0.1.x（developer preview，API 可能有破坏性变更）。
 兼容性以实际安装的 profile 依赖树为准。
 
+## 0.3.0 — 2026-09-05
+
+### 新功能：沉淀时机判据（三层漏斗 + 合并沉淀）
+
+按用户反馈治理"沉淀时机"：不该每轮对话都沉淀，也不该让该沉的漏掉。引入三层判定：
+
+1. **第一层 硬门槛（插件代码判定，不依赖模型自觉）**
+   - 新增 `evaluateRetroEligibility()`：要求会话**真实改过代码**（工具名命中写工具集合 edit/write/...，只读诊断、纯问答不计）且工具调用达到 `retroMinToolCalls`，才认为"有资格沉淀"
+   - 新增配置 `retroRequireCodeChange`（默认 `true`）：纯问答 / 只读诊断 / 一次性任务被自动拦下，不再提示沉淀
+2. **第二层 复用价值三问（模型在调用 spec_retro 前自检）**：下次是否还这么干 / 结论是否跨项目成立 / 用户是否会反复提；任一为否则跳过
+3. **第三层 合并沉淀（任务链收尾一次）**：一条任务链（两次 spec_recall 之间）只沉淀一次，链内小修（编译错、警告修复）合并进最终那份；`spec_retro` 描述与 SKILL.md 同步改写
+
+配套规则：跳过沉淀时必须回一句话说明（"本次为只读诊断/无复用价值，已跳过；需要记录说一声"）；用户说"沉淀/总结/记到模板库"时无条件调用 `spec_retro`；纯问答/只读诊断禁止沉淀。
+
+### 修复：兜底提醒从未真正生效（关键 Bug）
+
+- **症状**：模型漏调 `spec_retro` 时没有任何提醒，沉淀完全靠模型自觉。
+- **根因**：兜底逻辑挂在 `ctx.on('turn/end')`，但 dsh 的 turn/end 事件载荷**不含 session 事件流**（`data` 只有 `{turn, reason}`），`extractSessionFacts(turn.session)` 恒为 null、`toolCalls` 恒为 0，低于 `retroMinToolCalls=2` → `pendingRetro` **从未被设置**，`spec_recall` 的 notice 从不出现。
+- **修复**：删除失效的 turn/end 判定与 `pendingRetro` 状态；`buildRecallNotice()` 改为在 `spec_recall` execute 内用 `exec.agent.session`（确定可得）实时提取会话事实并跑门槛，未沉淀且真实改码时随召回结果附带提示。
+
+### 验证
+
+- 单元测试 109 → **117 通过**（新增门槛判定 8 用例）
+- 硬门槛分离度验证：真实 dsh 会话（youting propertyStaff 任务链）中 spec_retro 2 次沉淀均可被门槛放行；只读问答会话被 `no-code-change` 拦下
+
 ## 0.2.1 — 2026-09-05
 
 ### 修复（阻断性 Bug）
