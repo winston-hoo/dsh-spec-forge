@@ -3,7 +3,56 @@
 本插件锁定目标 dsh 版本：`@deepseek-ai/dsh` 0.1.x（developer preview，API 可能有破坏性变更）。
 兼容性以实际安装的 profile 依赖树为准。
 
-## 0.3.1 — 2026-09-05
+## 0.3.2 — 2026-09-05
+
+代码审查驱动的健壮性 & 性能修复（配合 README 去公式化重写），并回应 token 消耗验证结论。
+
+### 新增：查询侧关键词聚焦（提高命中余量）
+
+- **症状**：真实用户需求往往很长（带路径、叙述、寒暄），`fingerprint()` 默认 24 个 token 里一多半是权重 1 的中文 2-gram，压低余弦与覆盖率；跨仓库（无同仓库加分）时容易跌破 0.35 阈值。同一条「管理页加 isMainAdmin 开关字段」需求，浓缩表述命中而原话（85 字）只在阈值边缘。
+- **修复**：新增 `focusFingerprint()`（lib/fingerprint.js）：查询指纹削掉低信号 2-gram 尾巴（权重≥2 的强 token 全保留 + 最多 8 个 2-gram 兜底中文表述），只作用于查询侧、不碰落盘模板指纹。`buildQueryFp`（spec_recall/spec_triage 共用）统一应用。
+- **实证（真实模板库，含仓库/标签/分类全加分）**：原话长需求总分 0.462 → 0.510（gram 上限 8）；无关需求 0.105 不变，无误召回。审计脚本按真实接线测量后，3 个仓库中 2 个默认阈值命中。
+
+### 精简：常驻系统提示段与工具描述
+
+- 常驻系统提示段 `spec-forge:routing`：873 字符 ≈603 tok → **615 字符 ≈407 tok**（删冗余句式，硬规则全部保留）。
+- `spec_triage` / `spec_retro` 工具描述精简（完整判据仍在 SKILL.md 与报告正文，不依赖描述里的长文）。
+- 五个工具定义合计 ≈2364 → ≈2250 tok/完整请求；固定税 ≈2967 → ≈2657 tok/完整请求。
+
+### 修复（spec_retro：假成功、坏指纹、摘要没接线）
+
+- **`saved: true` 硬编码**：模板写盘失败会静默返回"已保存"。现在写盘包 try/catch，失败返回
+  `saved: false` + 错误信息 + 重试指引，不再向上冒泡崩溃 dsh。
+- **指纹引用了参数表里不存在的 `args.requirement`**（恒 undefined）：指纹只有 name/trigger/tags
+  三个来源，丢掉了真实做过的 approach。现改为 `name + trigger + tags + approach + digest前300字`
+  五源拼接。
+- **`buildRetroDigest` 只 import 没调用**：描述里承诺的"digest 留空自动提取"从未实现。现接入
+  `exec.agent.session` 事件流自动提取摘要，`prompt` 为空时回退到 digest。
+
+### 修复（召回打分一致性 & 失真）
+
+- `spec_triage` 的模板排序仍用裸 `fingerprint()`，tags/category 加分没接上（0.3.1 只修了
+  `spec_recall`）。现抽出 `buildQueryFp()` 统一两处查询指纹。
+- `spec_recall` 记命中前只排 top-N：热度排序在小库上失真。改为全量排序后取 top 再注入。
+- 标签重叠从 jaccard 改为**覆盖率**（交集/模板标签数）：查询侧标签上限 8 个会撑大 jaccard 分母，
+  把重叠率稀释到无意义。新增组件别名归一（`a-switch`→`switch`、`el-switch`→`switch`、
+  `element-plus`→`elementplus`、`vue3`→`vue`）与中英技术词映射（"开关"→`switch`、"分页"→`pagination`），
+  解决模板标签与需求原文跨语言对不上。
+
+### 性能 & 死代码
+
+- `listTemplates` 每次召回都全量读盘解析全部模板。现加进程内读缓存：任何写盘（写版本号）或
+  文件名集合变化（外部增删）即失效，返回副本防调用方原地排序污染。
+- `purgeStale` 无人调用（死代码）。拆出 `staleTemplates()`（只统计不删除），`spec_library`
+  报告 ≥90 天未命中的过期模板；物理删除只在用户显式要求时通过 `purge: true` 执行。
+
+### 验证
+
+- 单元测试 129 → **138 通过**（新增：staleTemplates 统计、缓存三态失效、调用方排序不污染、focusFingerprint 4 例）
+- smoke / verify 全绿；`npm test` 全量通过
+- 新增 `npm run token-audit`：静态 token 预算审计（可复现，无外部依赖）
+
+
 
 ### 修复：打分里 22% 权重从未生效（查询侧 tags / category 没接线）
 

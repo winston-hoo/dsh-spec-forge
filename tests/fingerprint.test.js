@@ -6,6 +6,7 @@ import {
   WEIGHT_TECH,
   extractPaths,
   fingerprint,
+  focusFingerprint,
   inferQueryTags,
   normalize,
   segmentChinese,
@@ -126,4 +127,71 @@ test('inferQueryTags：结果数量不超过上限（避免稀释 jaccard 分母
 test('inferQueryTags：空输入返回空数组', () => {
   assert.deepEqual(inferQueryTags(''), [])
   assert.deepEqual(inferQueryTags(null), [])
+})
+
+// ---------- 查询侧聚焦（0.3.2） ----------
+
+test('focusFingerprint：强信号 token 全保留，2-gram 截断到上限', () => {
+  const fp = [
+    { token: 'index.vue', weight: 4 },
+    { token: '新增', weight: 3 },
+    { token: 'ismainadmin', weight: 2 },
+    { token: '管理', weight: 1 },
+    { token: '页面', weight: 1 },
+    { token: '字段', weight: 1 },
+    { token: '展示', weight: 1 },
+    { token: '完成', weight: 1 },
+    { token: '需求', weight: 1 },
+    { token: '帮助', weight: 1 },
+    { token: '这个', weight: 1 },
+  ]
+  const out = focusFingerprint(fp, 3)
+  const strong = out.filter((t) => t.weight >= 2).length
+  const grams = out.filter((t) => t.weight < 2).length
+  assert.equal(strong, 3, '权重>=2 的 token 一个都不能丢')
+  assert.equal(grams, 3, '2-gram 应截断到 maxGram=3')
+  assert.equal(out.length, 6)
+})
+
+test('focusFingerprint：默认保留 8 个 2-gram 兜底中文表述', () => {
+  const grams = Array.from({ length: 20 }, (_, i) => ({ token: `词${i}`, weight: 1 }))
+  const strong = [{ token: 'vue', weight: 3 }]
+  const out = focusFingerprint([...grams, ...strong])
+  assert.equal(out.filter((t) => t.weight < 2).length, 8, '默认 maxGram=8')
+  assert.ok(out.some((t) => t.token === 'vue'))
+})
+
+test('focusFingerprint：非数组与空输入安全返回', () => {
+  assert.deepEqual(focusFingerprint(null), [])
+  assert.deepEqual(focusFingerprint(undefined), [])
+  assert.deepEqual(focusFingerprint([]), [])
+})
+
+test('focusFingerprint：长需求聚焦后覆盖率不降反升（低信号尾巴被削掉）', () => {
+  const long = fingerprint(
+    'index.vue 这个物业管理员管理页面的新增/修改接口增加一个主管管员字段 isMainAdmin，值为1是，0否，默认为否，这个字段用开关来显示，请帮我完成这个需求',
+    24
+  )
+  const focused = focusFingerprint(long)
+  assert.ok(focused.length < long.length, '聚焦应削减 token 数')
+  // 模板侧只含强信号 token + 少量共有 gram 的受控场景
+  const template = new Map([
+    ['index.vue', 4],
+    ['新增', 3],
+    ['修改', 3],
+    ['ismainadmin', 2],
+    ['admin', 2],
+    ['管理', 1],
+    ['页面', 1],
+  ])
+  const cov = (tokens) => {
+    const total = tokens.reduce((a, x) => a + (x.weight ?? 1), 0)
+    let covered = 0
+    for (const t of tokens) {
+      const wb = template.get(t.token)
+      if (wb !== undefined) covered += Math.min(t.weight ?? 1, wb)
+    }
+    return covered / total
+  }
+  assert.ok(cov(focused) >= cov(long), `聚焦后覆盖率应更高：聚焦=${cov(focused).toFixed(3)} 原=${cov(long).toFixed(3)}`)
 })

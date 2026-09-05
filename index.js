@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url'
 import Schema from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
-import { fingerprint, inferQueryTags } from './lib/fingerprint.js'
+import { fingerprint, focusFingerprint, inferQueryTags } from './lib/fingerprint.js'
 import { inferQueryCategory } from './lib/classify.js'
 import { rankTemplates } from './lib/match.js'
 import { buildRetroDigest, evaluateRetroEligibility, extractSessionFacts, isSessionComplete } from './lib/extract.js'
@@ -27,9 +27,11 @@ import {
   dataRoot,
   describeStore,
   listTemplates,
+  purgeStale,
   readProfile,
   recordHit,
   repoHash,
+  staleTemplates,
   templateId,
   writeProfile,
   writeTemplate,
@@ -72,7 +74,7 @@ export function apply(ctx, config) {
     retroDone: new Set(), // sessionId：已成功沉淀过的会话，不再打扰
   }
 
-  // ---------- 第 1 层：常驻系统提示词（必须短，控制在 200 token 内） ----------
+  // ---------- 第 1 层：常驻系统提示词（必须短，0.3.2 精简后约 400 token/请求） ----------
 
   const systemPrompt = ctx.get('systemPrompt')
   if (systemPrompt?.section && config.autoRecall) {
@@ -81,26 +83,19 @@ export function apply(ctx, config) {
       order: 150,
       text: [
         '## 需求锻造（spec-forge）',
-        '收到编程类需求时，按以下顺序执行，不要跳过：',
-        '1. 先调用 `spec_recall` 检索历史模板与本项目禁区，再动手。',
-        '2. 调用 `spec_triage` 做需求完整度体检。报告会标注 Level 1/2/3，',
-        '   **严格按报告等级执行**：',
-        '   - **Level 1 原子操作**（单文件 CRUD + 组件/默认值已明确）：直接看报告里的',
-        '     "直接执行清单"动手，扫描现有代码风格自举，不许追问。',
-        '     对默认值有疑虑就用 `// TODO: [待确认]` 标注，最终报告里点出。',
-        '   - **Level 2 模块变更**（最多 3 个追问）：把报告里"需要先向你确认"的问题整理给用户，',
-        '     已推断的默认值会一起给出（"不答复即按此执行"）。',
-        '   - **Level 3 架构重构**：完整 Grill-me 追问流程，无问题数上限。',
-        '   **跳过词规则**：用户消息中包含"直接做 / 速做 / 不用问 / 别问 / 不要问 / 极速模式"',
-        '   任意一个 → 无条件 Level 1。',
-        '   **急停规则（无条件遵守）：任何等级下，提问之前禁止调用任何文件类工具**——',
-        '   read_file、read_dir、grep、glob、find、search、bash、ls、tree 一律不许碰。',
-        '   即使你对项目一无所知，也必须先问（Level 2/3）或先动手（Level 1），不要预扫工作区。',
-        '3. 需求明确后调用 `spec_distill` 生成结构化提示词，作为后续实现的执行依据。',
-        '4. 任务链真正收尾（改码完成且验证通过）后调用 `spec_retro` 沉淀成模板，一次即可，链内小修合并进最终那份。',
-        '   调用前过复用价值三问（下次是否还这么干/结论是否跨项目成立/用户是否会反复提）；',
-        '   纯问答、只读诊断、一次性改动不调；用户说"沉淀/总结/记到模板库"则必须调。',
-        '禁区是硬约束：任何被标记为禁区的文件或行为，一律不得修改。',
+        '编程类需求按序执行：spec_recall → spec_triage → 澄清/直接做 → spec_distill → 实现 → spec_retro。',
+        '1. 先 spec_recall 检索历史模板与项目禁区，再动手。',
+        '2. spec_triage 体检并定 Level，严格按等级响应：',
+        '   L1 原子操作：照报告"直接执行清单"直接改（扫目标文件近 50 行表单代码自举），不许追问；',
+        '     疑虑用 `// TODO: [待确认]` 标注并在报告里点出。',
+        '   L2 模块变更：最多 3 问，默认值随问题给出，不答复按默认执行。',
+        '   L3 架构重构：完整 Grill-me，不限问数。',
+        '   消息含"直接做/速做/不用问/别问/不要问/极速模式"任一 → 无条件 L1。',
+        '   **急停（无条件）**：提问前禁止调用任何文件类工具（read_file/grep/glob/find/bash/ls/tree 等），不预扫工作区。',
+        '3. 澄清完调 spec_distill 生成结构化提示词，作为实现依据。',
+        '4. 任务链收尾（改码完成且验证通过）后调 spec_retro 沉淀一次，链内小修合并；',
+        '   先过复用价值三问（还会照做吗/结论跨项目成立吗/会反复提吗）；纯问答、只读、一次性改动不调；用户明确要求时无条件调。',
+        '禁区（项目档案或模板注入）是硬约束，一律不得修改。',
       ].join('\n'),
     })
   }
@@ -166,25 +161,23 @@ export function apply(ctx, config) {
         const scope = repoHash(cwd)
 
         const templates = listTemplates(home, scope)
-        const queryFp = fingerprint(args.requirement)
-        // 查询侧补齐 tags / category：模板沉淀时存了这两个字段，打分里
-        // 0.08 的标签重叠 + 0.14 的同分类此前因查询侧缺失而恒为 0（接线缺口）。
-        queryFp.tags = inferQueryTags(args.requirement)
-        const queryCategory = inferQueryCategory(args.requirement)
-        if (queryCategory) queryFp.category = queryCategory
-        const results = rankTemplates({
+        const queryFp = buildQueryFp(args.requirement)
+
+        // 先对全部模板打分（不截断），把每一份过线模板都记一次命中——
+        // 热度加成才反映真实分布。旧版只遍历截断后的前 N 名，第 3 名之后
+        // 的高相关模板永远攒不到热度。
+        const all = rankTemplates({
           queryFp,
           templates,
           repoHash: scope,
           threshold: config.matchThreshold,
-          limit: config.maxInjectTemplates,
+          limit: templates.length || 1,
         })
-
-        // 记录命中，让高频模板在后续检索中逐渐占优
-        for (const r of results) {
+        for (const r of all) {
           if (r.hit) recordHit(home, r.template.scope, r.template.id)
         }
 
+        const results = all.slice(0, config.maxInjectTemplates)
         const hitTemplates = results.filter((r) => r.hit)
         const redlines = collectRedlines(home, scope, hitTemplates.map((r) => r.template))
 
@@ -220,7 +213,7 @@ export function apply(ctx, config) {
     defineTool({
       name: 'spec_triage',
       description:
-        '对用户需求做完整度体检，从「要实现什么、要怎么改、哪些不能改、上下文」四个维度识别信息缺口。报告头部会标注 Level 1/2/3：Level 1 原子操作（单文件 CRUD + 组件/默认值明确）输出"直接执行清单"与风格自举要求，**禁止追问**；Level 2 模块变更最多 3 个追问，每题报告里已给默认值；Level 3 架构重构走完整 Grill-me。判定 Level 1 的关键信号：用户消息中包含"直接做/速做/不用问/别问/不要问/极速模式"任意一个 → 无条件 Level 1。',
+        '对用户需求做四维完整度体检（要实现什么/怎么改/哪些不能改/上下文），报告标注 Level 并按级行动：L1 原子操作输出"直接执行清单"+风格自举要求，禁止追问；L2 模块变更最多 3 问（报告已给默认值，不答复按默认执行）；L3 架构重构完整 Grill-me。消息含"直接做/速做/不用问/别问/不要问/极速模式"任一 → 无条件 L1。',
       parameters: {
         requirement: {
           type: 'string',
@@ -255,7 +248,7 @@ export function apply(ctx, config) {
         const scope = repoHash(resolveCwd(args.cwd, exec))
         const templates = listTemplates(home, scope)
         const results = rankTemplates({
-          queryFp: fingerprint(args.requirement),
+          queryFp: buildQueryFp(args.requirement),
           templates,
           repoHash: scope,
           threshold: config.matchThreshold,
@@ -374,7 +367,7 @@ export function apply(ctx, config) {
     defineTool({
       name: 'spec_retro',
       description:
-        '任务链结束时做归类总结并沉淀为模板（供未来同类需求自动召回复用）。调用时机与取舍：1) 仅当一条任务链真正收尾——改动完成、验证通过、用户未提出新的修改要求——时调用一次，链内的小修小补不要中途反复调用，合并进最终那一份；2) 调用前先过复用价值三问：下次遇到同类需求是否还会照此做法？结论是否离了本项目仍成立？用户是否会反复提这类需求？三问任一为否则不调；3) 纯问答、只读诊断、一次性临时任务绝不调用；4) 用户明确要求沉淀（说"沉淀/总结/记到模板库"等）时无条件调用。写库后同类需求会被 spec_recall 自动召回。',
+        '任务链真正收尾（改码完成、验证通过、用户无新要求）时把本次做法沉淀为模板，供未来同类需求自动召回复用。时机取舍：仅链尾调一次，链内小修合并进最终份；先过复用价值三问（下次还照做吗/结论跨项目成立吗/用户会反复提吗），任一为否则不调；纯问答/只读诊断/一次性任务绝不调用；用户明确说"沉淀/总结/记到模板库"则无条件调用。同名需求重复沉淀会覆盖更新，不新建。',
       parameters: {
         name: { type: 'string', required: true, description: '模板名称，一句话概括这类需求，如「Spring Boot 新增分页查询接口」' },
         category: { type: 'string', description: '分类，如 feature/api、bugfix/refactor、frontend/component，默认 uncategorized' },
@@ -406,7 +399,10 @@ export function apply(ctx, config) {
         render: (_args, value) => [
           {
             type: 'text',
-            text: `${value.updated ? '已更新' : '已新建'}模板 \`${value.id}\`（${value.scope} 层）\n路径：${value.file}\n\n${value.preview}`,
+            text:
+              value.saved === false
+                ? `模板写盘失败\n${value.preview}`
+                : `${value.updated ? '已更新' : '已新建'}模板 \`${value.id}\`（${value.scope} 层）\n路径：${value.file}\n\n${value.preview}`,
           },
         ],
       },
@@ -415,6 +411,13 @@ export function apply(ctx, config) {
         const scopeName = args.scope === 'global' ? 'global' : args.scope === 'project' ? 'project' : config.defaultScope
         const hash = repoHash(cwd)
         const scope = scopeName === 'global' ? 'global' : hash
+
+        // 过程摘要：模型传了就用手传的，否则从会话事件流自动提取。
+        // （描述里承诺了"留空自动提取"，旧版从未实现——buildRetroDigest 只 import 没调用。）
+        const digest =
+          args.digest ||
+          (exec?.agent?.session ? buildRetroDigest(exec.agent.session, 1500) : '') ||
+          ''
 
         const id = templateId(args.name, scope)
         const existing = listTemplates(home, scope).find((t) => t.id === id)
@@ -432,7 +435,7 @@ export function apply(ctx, config) {
           clarify: mergeList(existing ? bulletsOf(sectionOf(existing.body, SECTIONS.clarify)) : [], args.clarify ?? []),
           approach: args.approach ?? [],
           redlines,
-          prompt: args.prompt || args.requirement || '',
+          prompt: args.prompt || digest || '',
           acceptance: mergeList(
             existing ? bulletsOf(sectionOf(existing.body, SECTIONS.acceptance)) : [],
             args.acceptance ?? []
@@ -440,37 +443,71 @@ export function apply(ctx, config) {
           repoName: profile.repoName || cwd,
         })
 
-        const saved = writeTemplate(
-          home,
-          scope,
-          id,
-          {
-            name: args.name,
-            category: args.category || 'uncategorized',
-            tags: args.tags ?? [],
-            fingerprint: fingerprint(`${args.name} ${args.trigger ?? ''} ${(args.tags ?? []).join(' ')} ${args.requirement ?? ''}`).map(
-              ({ token, weight }) => `${token}|${weight}`
-            ),
-            repo: scope === 'global' ? '' : scope,
-            hitCount: existing?.hitCount ?? 0,
-            created: existing?.created,
-          },
-          body
-        )
+        // 模板写盘：失败不抛到 dsh（旧版 saved 硬编码 true，写失败会直接冒泡）。
+        let saved
+        let writeError = null
+        try {
+          saved = writeTemplate(
+            home,
+            scope,
+            id,
+            {
+              name: args.name,
+              category: args.category || 'uncategorized',
+              tags: args.tags ?? [],
+              // 指纹正文：name+trigger+tags 太单薄，且旧版引用了参数表里不存在的
+              // args.requirement（恒 undefined），等于只有三个来源。补上 approach 与
+              // digest 前缀，把真实做过的事带进指纹，召回才能命中。
+              fingerprint: fingerprint(
+                [
+                  args.name,
+                  args.trigger ?? '',
+                  (args.tags ?? []).join(' '),
+                  (args.approach ?? []).join(' '),
+                  digest.slice(0, 300),
+                ]
+                  .filter(Boolean)
+                  .join(' ')
+              ).map(({ token, weight }) => `${token}|${weight}`),
+              repo: scope === 'global' ? '' : scope,
+              hitCount: existing?.hitCount ?? 0,
+              created: existing?.created,
+            },
+            body
+          )
+        } catch (err) {
+          writeError = err
+          ctx.logger?.warn?.(`[spec-forge] 模板写盘失败: ${err.message}`)
+        }
 
         // 禁区写入项目档案，长期生效
-        if (args.persistRedlines !== false && hash !== 'global' && redlines.length > 0) {
-          writeProfile(home, hash, {
-            repoName: profile.repoName || cwd,
-            redlines: [...new Set([...profile.redlines, ...(args.redlines ?? [])])],
-            conventions: profile.conventions,
-            notes: profile.notes,
-          })
+        if (!writeError && args.persistRedlines !== false && hash !== 'global' && redlines.length > 0) {
+          try {
+            writeProfile(home, hash, {
+              repoName: profile.repoName || cwd,
+              redlines: [...new Set([...profile.redlines, ...(args.redlines ?? [])])],
+              conventions: profile.conventions,
+              notes: profile.notes,
+            })
+          } catch (err) {
+            ctx.logger?.warn?.(`[spec-forge] 禁区写入项目档案失败: ${err.message}`)
+          }
         }
 
         const sessionId = exec?.agent?.session?.id
         if (sessionId) {
           state.retroDone.add(sessionId)
+        }
+
+        if (writeError) {
+          return {
+            saved: false,
+            id,
+            file: '',
+            scope,
+            updated,
+            preview: `模板未能写入磁盘（${writeError.message}）。内容没有丢失：请在会话里把 name/approach/redlines 直接贴给下一次 spec_retro 重试。`,
+          }
         }
 
         return {
@@ -479,7 +516,7 @@ export function apply(ctx, config) {
           file: saved.file,
           scope,
           updated,
-          preview: args.digest || buildPreview(args),
+          preview: digest || buildPreview(args),
         }
       },
     })
@@ -491,9 +528,14 @@ export function apply(ctx, config) {
     defineTool({
       name: 'spec_library',
       description:
-        '查看提示词模板库的状态与清单：数据目录、当前仓库哈希、模板总数、项目禁区。当用户询问「模板库里有什么」「都沉淀了哪些模板」时调用。',
+        '查看提示词模板库的状态与清单：数据目录、当前仓库哈希、模板总数、项目禁区，以及超过 90 天未使用的过期模板。当用户询问「模板库里有什么」「都沉淀了哪些模板」时调用。如需清理过期模板，仅在用户明确要求删除时才把 purge 设为 true（删除不可恢复）。',
       parameters: {
         cwd: { type: 'string', description: '当前工作目录绝对路径' },
+        purge: {
+          type: 'boolean',
+          description:
+            '是否物理删除过期模板（超过 90 天未使用）。默认 false 只统计不删除；必须用户明确表达「清理/删除过期模板」的意图才能传 true，删除不可恢复。',
+        },
       },
       output: {
         schema: {
@@ -502,6 +544,7 @@ export function apply(ctx, config) {
           properties: {
             report: { type: 'string', required: true },
             total: { type: 'number', required: true },
+            removed: { type: 'number' },
           },
         },
         render: (_args, value) => [{ type: 'text', text: value.report }],
@@ -509,6 +552,12 @@ export function apply(ctx, config) {
       async execute(args, exec) {
         const cwd = resolveCwd(args.cwd, exec)
         const scope = repoHash(cwd)
+
+        let removed = 0
+        if (args.purge === true) {
+          removed = purgeStale(home, scope, 90)
+        }
+        const stale = staleTemplates(home, scope)
         const info = describeStore(home, scope)
         const templates = listTemplates(home, scope)
 
@@ -534,13 +583,31 @@ export function apply(ctx, config) {
           lines.push('')
         }
 
+        if (removed > 0) {
+          lines.push(`已按用户要求清理 ${removed} 个过期模板（≥90 天未使用）。`)
+          lines.push('')
+        } else if (stale.length > 0) {
+          lines.push(`### 过期模板（≥90 天未使用，${stale.length} 个）`)
+          lines.push('')
+          lines.push('这些模板长期未被召回命中。模板库不是越堆越好——过期模板会稀释检索精度。')
+          lines.push('如需删除请在对话中明确说「清理过期模板」，会物理删除且不可恢复。')
+          lines.push('')
+          for (const t of stale) {
+            const last = t.lastUsed || t.updated || t.created || ''
+            lines.push(
+              `- ${t.name}（${t.scope === 'global' ? '全局' : '项目'}，最近使用 ${String(last).slice(0, 10) || '未知'}）`
+            )
+          }
+          lines.push('')
+        }
+
         if (info.profile.redlines.length > 0) {
           lines.push('### 项目禁区（长期生效）')
           lines.push('')
           for (const r of info.profile.redlines) lines.push(`- ${r}`)
         }
 
-        return { report: lines.join('\n'), total: info.total }
+        return { report: lines.join('\n'), total: info.total, removed }
       },
     })
   )
@@ -563,6 +630,21 @@ function bulletsOf(section) {
 
 function mergeList(existing, incoming) {
   return [...new Set([...existing, ...incoming])].filter(Boolean)
+}
+
+/**
+ * 构造查询指纹：tokens + tags + category 三件套。
+ * 打分器里 0.14 同分类与 0.08 标签重叠需要查询侧补齐这两个字段，
+ * 否则天平只接模板一边、两项恒为 0（0.3.1 曾因此在 spec_recall 漏接，spec_triage 同病）。
+ */
+function buildQueryFp(requirement) {
+  // 查询侧聚焦：长需求原话先削掉低信号 2-gram 尾巴再进打分，
+  // 避免叙述性文字稀释余弦/覆盖率（见 lib/fingerprint.js focusFingerprint）。
+  const fp = focusFingerprint(fingerprint(requirement))
+  fp.tags = inferQueryTags(requirement)
+  const category = inferQueryCategory(requirement)
+  if (category) fp.category = category
+  return fp
 }
 
 function buildRecallNotice(exec, state, config) {

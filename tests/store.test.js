@@ -20,6 +20,7 @@ import {
   recordHit,
   repoHash,
   resolveHome,
+  staleTemplates,
   stringifyFrontmatter,
   templateId,
   templatePath,
@@ -275,4 +276,57 @@ test('purgeStale：时间判定回退 updated，无任何时间字段的模板�
   const left = listTemplates(tmpHome, 'abc123')
   assert.equal(left.length, 1)
   assert.equal(left[0].id, noDates)
+})
+
+test('staleTemplates：只统计不删除，返回可精确定位的过期模板', () => {
+  writeTemplate(tmpHome, 'abc123', templateId('近的', 'abc123'), { name: '近的', lastUsed: dateNDaysAgo(5) }, 'body')
+  const oldId = templateId('老的', 'abc123')
+  writeTemplate(tmpHome, 'abc123', oldId, { name: '老的', lastUsed: dateNDaysAgo(95) }, 'body')
+
+  const stale = staleTemplates(tmpHome, 'abc123')
+  assert.equal(stale.length, 1)
+  assert.equal(stale[0].name, '老的')
+  assert.ok(stale[0].file, '应带 file 路径供后续精确删除')
+  assert.ok(existsSync(templatePath(tmpHome, 'abc123', oldId)), '统计不应删除文件')
+  assert.equal(listTemplates(tmpHome, 'abc123').length, 2)
+})
+
+test('listTemplates 读缓存：写盘后再次列出立即可见新模板（写版本号失效）', () => {
+  writeTemplate(tmpHome, 'abc123', templateId('缓存甲', 'abc123'), { name: '缓存甲' }, 'body')
+  assert.equal(listTemplates(tmpHome, 'abc123').length, 1)
+
+  const id2 = templateId('缓存乙', 'abc123')
+  writeTemplate(tmpHome, 'abc123', id2, { name: '缓存乙' }, 'body')
+  const names = listTemplates(tmpHome, 'abc123').map((t) => t.name)
+  assert.ok(names.includes('缓存乙'), '写盘后新模板必须立即可见，不得返回旧缓存')
+})
+
+test('listTemplates 读缓存：recordHit 只改内容不改文件名，命中数仍立即可见', () => {
+  const id = templateId('计数', 'abc123')
+  writeTemplate(tmpHome, 'abc123', id, { name: '计数' }, 'body')
+  const before = listTemplates(tmpHome, 'abc123')[0]
+
+  recordHit(tmpHome, 'abc123', id)
+  const after = listTemplates(tmpHome, 'abc123')[0]
+  assert.equal(after.hitCount, (before.hitCount ?? 0) + 1, '命中计数写盘后应立即可见')
+})
+
+test('listTemplates 读缓存：外部直写新文件（绕过写版本号）也能被文件名集合变化发现', () => {
+  writeTemplate(tmpHome, 'abc123', templateId('已有', 'abc123'), { name: '已有' }, 'body')
+  listTemplates(tmpHome, 'abc123') // 填充缓存
+
+  const extId = templateId('外部新增', 'abc123')
+  writeFileSync(templatePath(tmpHome, 'abc123', extId), stringifyFrontmatter({ id: extId, name: '外部新增' }, 'body'))
+  const names = listTemplates(tmpHome, 'abc123').map((t) => t.name)
+  assert.ok(names.includes('外部新增'), '文件名集合变化应触发缓存重建')
+})
+
+test('listTemplates 读缓存：调用方原地排序不污染缓存内容', () => {
+  writeTemplate(tmpHome, 'abc123', templateId('低命中', 'abc123'), { name: '低命中', hitCount: 1 }, 'body')
+  writeTemplate(tmpHome, 'abc123', templateId('高命中', 'abc123'), { name: '高命中', hitCount: 9 }, 'body')
+
+  listTemplates(tmpHome, 'abc123').sort((a, b) => a.hitCount - b.hitCount) // 原地排序
+  const again = listTemplates(tmpHome, 'abc123')
+  assert.equal(again.length, 2)
+  assert.deepEqual(again.map((t) => t.name).sort(), ['低命中', '高命中'], '缓存内容不得被调用方污染')
 })
