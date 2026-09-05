@@ -82,12 +82,19 @@ export function apply(ctx, config) {
         '## 需求锻造（spec-forge）',
         '收到编程类需求时，按以下顺序执行，不要跳过：',
         '1. 先调用 `spec_recall` 检索历史模板与本项目禁区，再动手。',
-        '2. 调用 `spec_triage` 做需求完整度体检。若返回「需要先向你确认」，',
-        '   **立即停止一切探查动作**，把缺失项整理成问卷向用户提问，拿到答复后才开始写代码。',
-        '   重点确认三件事：要实现什么、要怎么改、哪些地方不能改。',
-        '   **急停规则（无条件遵守）：提问之前，禁止调用任何文件类工具**——',
+        '2. 调用 `spec_triage` 做需求完整度体检。报告会标注 Level 1/2/3，',
+        '   **严格按报告等级执行**：',
+        '   - **Level 1 原子操作**（单文件 CRUD + 组件/默认值已明确）：直接看报告里的',
+        '     "直接执行清单"动手，扫描现有代码风格自举，不许追问。',
+        '     对默认值有疑虑就用 `// TODO: [待确认]` 标注，最终报告里点出。',
+        '   - **Level 2 模块变更**（最多 3 个追问）：把报告里"需要先向你确认"的问题整理给用户，',
+        '     已推断的默认值会一起给出（"不答复即按此执行"）。',
+        '   - **Level 3 架构重构**：完整 Grill-me 追问流程，无问题数上限。',
+        '   **跳过词规则**：用户消息中包含"直接做 / 速做 / 不用问 / 别问 / 不要问 / 极速模式"',
+        '   任意一个 → 无条件 Level 1。',
+        '   **急停规则（无条件遵守）：任何等级下，提问之前禁止调用任何文件类工具**——',
         '   read_file、read_dir、grep、glob、find、search、bash、ls、tree 一律不许碰。',
-        '   即使你对项目一无所知，也必须先问，不要先查，不要为了问得更「聪明」而预扫工作区。',
+        '   即使你对项目一无所知，也必须先问（Level 2/3）或先动手（Level 1），不要预扫工作区。',
         '3. 需求明确后调用 `spec_distill` 生成结构化提示词，作为后续实现的执行依据。',
         '4. 任务完成后调用 `spec_retro` 沉淀成模板。',
         '禁区是硬约束：任何被标记为禁区的文件或行为，一律不得修改。',
@@ -214,7 +221,7 @@ export function apply(ctx, config) {
     defineTool({
       name: 'spec_triage',
       description:
-        '对用户需求做完整度体检，从「要实现什么、要怎么改、哪些不能改、上下文」四个维度识别信息缺口。当需求描述含糊、过短、缺少文件路径或没有说明禁区时调用。若返回 needsClarify=true：你必须立即把缺失项整理成问卷向用户提问，提问前禁止调用任何文件类工具（read_file/grep/bash/find 等），禁止预扫工作区。',
+        '对用户需求做完整度体检，从「要实现什么、要怎么改、哪些不能改、上下文」四个维度识别信息缺口。报告头部会标注 Level 1/2/3：Level 1 原子操作（单文件 CRUD + 组件/默认值明确）输出"直接执行清单"与风格自举要求，**禁止追问**；Level 2 模块变更最多 3 个追问，每题报告里已给默认值；Level 3 架构重构走完整 Grill-me。判定 Level 1 的关键信号：用户消息中包含"直接做/速做/不用问/别问/不要问/极速模式"任意一个 → 无条件 Level 1。',
       parameters: {
         requirement: {
           type: 'string',
@@ -231,10 +238,13 @@ export function apply(ctx, config) {
           type: 'object',
           additionalProperties: true,
           properties: {
+            mode: { type: 'string', required: true, description: 'fast-track(L1) | clarify(L2/L3 待追问) | ready(可直接实现)' },
+            level: { type: 'number', required: true, description: '复杂度等级 1|2|3' },
             needsClarify: { type: 'boolean', required: true },
+            ready: { type: 'boolean', required: true },
             report: { type: 'string', required: true },
             questions: { type: 'array' },
-            ready: { type: 'boolean', required: true },
+            classification: { type: 'object' },
           },
         },
         render: (_args, value) => [{ type: 'text', text: value.report }],
@@ -259,11 +269,17 @@ export function apply(ctx, config) {
 
         const report = renderTriageReport(result, { templateHints: hints })
 
+        const level = result.classification.level
+        const mode = level === 1 ? 'fast-track' : result.needsClarify ? 'clarify' : 'ready'
+
         return {
+          mode,
+          level,
           needsClarify: result.needsClarify,
           ready: result.ready,
           report,
           questions: [...result.missing, ...result.partial].map((d) => `${d.label}：${d.question}`),
+          classification: result.classification,
         }
       },
     })
