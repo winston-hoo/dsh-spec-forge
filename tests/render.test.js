@@ -79,11 +79,75 @@ test('renderTriageReport：需求齐全时不出现急停指令', () => {
   assert.ok(report.includes('可以直接进入实现阶段'))
 })
 
-test('renderTriageReport：可以附带历史模板的追加确认项', () => {
+test('renderTriageReport：L2 不再附带历史模板提示（避免与分类器推断值重复）', () => {
   const r = triageRequirement('帮我改一下')
+  assert.equal(r.classification.level, 2)
   const report = renderTriageReport(r, { templateHints: ['分页参数是 pageNum/pageSize 还是 offset/limit？'] })
+  assert.ok(report.includes('Level 2'), '必须标注 Level 2')
+  assert.ok(!report.includes('历史模板建议追加确认'), 'L2 不再附带历史模板提示')
+})
+
+test('renderTriageReport：L3 仍可附带历史模板的追加确认项', () => {
+  const r = triageRequirement('需要重构整个订单服务，涉及建表和跨文件迁移')
+  assert.equal(r.classification.level, 3, '必须判定为 Level 3')
+  const report = renderTriageReport(r, { templateHints: ['分页参数是 pageNum/pageSize 还是 offset/limit？'] })
+  assert.ok(report.includes('Level 3'), '必须标注 Level 3')
   assert.ok(report.includes('历史模板建议追加确认'))
   assert.ok(report.includes('pageNum/pageSize'))
+})
+
+test('renderTriageReport：Level 1 快速通道——单字段 CRUD 输出"执行清单"且无追问', () => {
+  const text =
+    'index.vue 这个物业管理员管理页面的新增/修改接口增加一个主管管员字段 isMainAdmin，值为1是，0否，默认为否，这个字段用开关来显示，请帮我完成这个需求'
+  const r = triageRequirement(text)
+  assert.equal(r.classification.level, 1)
+  assert.equal(r.needsClarify, false, 'L1 必须 needsClarify=false，禁止追问')
+  assert.equal(r.ready, true, 'L1 必须 ready=true，可直接动手')
+
+  const report = renderTriageReport(r)
+  assert.ok(report.includes('Level 1'), '必须标注 Level 1')
+  assert.ok(report.includes('直接执行清单'), '必须输出直接执行清单')
+  assert.ok(report.includes('风格自举要求'), '必须输出风格自举要求')
+  assert.ok(report.includes('保守默认'), '必须输出保守默认表')
+  assert.ok(report.includes('待办标注规则'), '必须输出待办标注规则')
+  assert.ok(report.includes('isMainAdmin'), '字段名必须出现')
+  assert.ok(report.includes('el-switch'), '推断的 UI 组件必须出现')
+  assert.ok(report.includes('否'), '推断的默认值必须出现')
+  assert.ok(report.includes('index.vue'), '推断的目标文件必须出现')
+  assert.ok(!report.includes('需要先向你确认'), 'L1 报告禁止出现"需要先向你确认"标题')
+})
+
+test('renderTriageReport：Level 1 跳过词场景输出明确的"已跳过追问"标识', () => {
+  const r = triageRequirement('直接做，改一下 a.vue 的样式')
+  assert.equal(r.classification.level, 1)
+  assert.equal(r.classification.skipTrigger, '直接做')
+  const report = renderTriageReport(r)
+  assert.ok(report.includes('Level 1'))
+  assert.ok(report.includes('直接做'), '跳过触发词必须出现在报告中')
+  assert.ok(report.includes('直接执行清单'))
+})
+
+test('renderTriageReport：Level 2 模块变更——问题数上限 3 条且附带推断默认值', () => {
+  const r = triageRequirement('在 UserController.java 帮我做一下用户列表的导出优化，需要支持 Excel 和 CSV')
+  assert.equal(r.classification.level, 2, `必须判定为 L2，signals=${r.classification.signals.join(',')}`)
+  const report = renderTriageReport(r)
+  assert.ok(report.includes('Level 2'))
+  // 问题数不应超过 L2_MAX_QUESTIONS
+  const questionsSection = report.split('需要先向你确认')[1] || ''
+  const questionsList = (questionsSection.match(/^- \*\*/gm) || []).length
+  assert.ok(questionsList <= 3, `L2 追问数应 ≤ 3，实际 ${questionsList}`)
+  assert.ok(report.includes('已从需求中推断出'), 'L2 必须附带"已从需求中推断出"区域')
+  assert.ok(report.includes('UserController.java'), '推断的文件路径必须出现')
+})
+
+test('renderTriageReport：Level 3 架构重构——问题数无上限', () => {
+  const r = triageRequirement('需要重构整个用户中心，跨文件跨模块')
+  assert.equal(r.classification.level, 3)
+  const report = renderTriageReport(r)
+  assert.ok(report.includes('Level 3'))
+  assert.ok(report.includes('急停'), 'L3 仍保留急停指令')
+  assert.ok(report.includes('先问后查'), 'L3 仍保留先问后查约束')
+  assert.ok(report.includes('禁止调用任何文件类工具'), 'L3 仍列明禁止的文件工具')
 })
 
 test('renderTemplateMarkdown：包含全部标准段落', () => {
