@@ -18,7 +18,8 @@ import { fileURLToPath } from 'node:url'
 import Schema from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
-import { fingerprint } from './lib/fingerprint.js'
+import { fingerprint, inferQueryTags } from './lib/fingerprint.js'
+import { inferQueryCategory } from './lib/classify.js'
 import { rankTemplates } from './lib/match.js'
 import { buildRetroDigest, evaluateRetroEligibility, extractSessionFacts, isSessionComplete } from './lib/extract.js'
 import {
@@ -166,6 +167,11 @@ export function apply(ctx, config) {
 
         const templates = listTemplates(home, scope)
         const queryFp = fingerprint(args.requirement)
+        // 查询侧补齐 tags / category：模板沉淀时存了这两个字段，打分里
+        // 0.08 的标签重叠 + 0.14 的同分类此前因查询侧缺失而恒为 0（接线缺口）。
+        queryFp.tags = inferQueryTags(args.requirement)
+        const queryCategory = inferQueryCategory(args.requirement)
+        if (queryCategory) queryFp.category = queryCategory
         const results = rankTemplates({
           queryFp,
           templates,

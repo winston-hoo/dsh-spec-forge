@@ -3,6 +3,29 @@
 本插件锁定目标 dsh 版本：`@deepseek-ai/dsh` 0.1.x（developer preview，API 可能有破坏性变更）。
 兼容性以实际安装的 profile 依赖树为准。
 
+## 0.3.1 — 2026-09-05
+
+### 修复：打分里 22% 权重从未生效（查询侧 tags / category 没接线）
+
+- **症状**：`scoreTemplate` 设计的「同分类 +0.14」「标签重叠 +0.08」在真实调用中恒为 0。
+- **根因**：`spec_recall` 传给打分器的 `queryFp` 是 `fingerprint()` 返回的**纯指纹数组**，不带 `category`/`tags`；而模板侧这两个字段在沉淀时都存了。天平两侧只接了一边。
+- **修复**：
+  - 新增 `inferQueryTags(requirement)`（lib/fingerprint.js）：从需求原文推断候选标签，**保留带连字符的复合词整体**（`a-switch` / `ant-design-vue`，否则会被切碎成 ant/design/vue 与模板标签对不上），并抽取路径片段、技术词、中文技术词、驼峰标识符；结果按权重截断到 8 个（数量过大会稀释 jaccard 分母，反而降低重叠率）
+  - 新增 `inferQueryCategory(requirement)`（lib/classify.js）：只推断**一级**分类（`bugfix`/`refactor`/`frontend`/`feature`），判不出来返回 undefined（宁可不加分，也不误加分 0.14）
+  - `scoreTemplate` 的分类比较放宽为**一级相同即同类**，匹配模板侧自由填写的二级名
+  - `spec_recall` execute 中把两者附加到 `queryFp` 上再打分
+
+### 实证（真实模板，非构造数据）
+
+| 需求 | 修复前 | 修复后 | 命中 |
+| --- | --- | --- | --- |
+| 同类：Vue 管理页加 isMainAdmin 开关字段（a-switch） | 0.487 | **0.633**（tag 重叠 0.077 + 同分类 1） | ✅ 命中，区分度更大 |
+| 无关：node_modules 加 .gitignore + 写 README | 0.105 | 0.105（tag/category 均为 0） | ❌ 仍不命中，无误召回 |
+
+### 验证
+
+- 单元测试 117 → **129 通过**（新增 12 用例：标签推断 5、类别推断 5、接线加分 2）
+
 ## 0.3.0 — 2026-09-05
 
 ### 新功能：沉淀时机判据（三层漏斗 + 合并沉淀）
