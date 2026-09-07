@@ -111,7 +111,7 @@ L1 还有一张"保守默认表"兜底：列表默认不展示新列、默认不
 存储是双层明文目录，项目层优先于全局层：
 
 ```
-$DSH_HOME/spec-forge/
+<storageRoot>/
 ├── global/                      # 全局层：跨仓库通用的习惯
 │   ├── templates/<id>.md
 │   └── profile.md
@@ -121,6 +121,24 @@ $DSH_HOME/spec-forge/
 ```
 
 仓库哈希 = 工作目录路径归一化后的 sha256 前 12 位（Windows 路径同样适用）。所有落盘都是原子写（先 `.tmp` 再 rename），崩溃不会留下半个文件。
+
+### 模板库放哪里：三种存储模式
+
+| 模式 | 实际路径 | 适用场景 |
+| --- | --- | --- |
+| `workspace`（默认，0.3.3+） | `<启动 dsh 的 cwd>/.dsh-spec-forge/` | 工作区与 `$DSH_HOME` 不同盘，避免跨盘 EPERM；模板库跟随当前项目 |
+| `home` | `$DSH_HOME/spec-forge/` | 旧版（≤0.3.2）默认；适合把模板库统一存在用户目录 |
+| `storageHome` 显式 | 你给的任意绝对路径 | 想放到自定义位置（如 OneDrive 同步盘） |
+
+跨盘写会触发 dsh 的 `workspace-write` 沙箱 EPERM（用户常反馈的"C 盘被拒绝"就是这个）。**新装用户无须配置**——0.3.3 起默认跟随工作区；老用户升级后如果还在用旧路径，调用 `spec_store({ action: 'info' })` 即可看到当前模式与路径，必要时调 `spec_store({ action: 'migrate' })` 把 `$DSH_HOME/spec-forge` 拷过来（默认复制保留源，验证后再传 `move: true` 删除源）。
+
+profile YAML 里手动覆盖：
+
+```yaml
+spec-forge:
+  storageRoot: workspace   # 或 home，或省略
+  storageHome: ''          # 非空则强制覆盖 storageRoot；建议留空
+```
 
 **模板库也会旧。** `spec_library` 会统计超过 90 天未被命中的过期模板并列出名字——模板不是越多越好，旧模板会稀释召回精度。但它只报告不擅自动手，**只有你明确说"清理过期模板"才会物理删除**（删了不可恢复）。
 
@@ -166,6 +184,7 @@ $DSH_HOME/spec-forge/
 | `spec_distill` | 澄清完毕、动手之前 | 把需求 + 澄清答案 + 禁区蒸馏成一份实现提示词；禁区为空会拦下 |
 | `spec_retro` | 任务收尾 | 把这次经验沉淀/更新成模板；digest 留空时自动从会话事件流提取摘要 |
 | `spec_library` | 用户问"模板库里有什么" | 展示数据目录、模板清单、命中统计、项目禁区、过期模板（可显式清理） |
+| `spec_store` | 用户问"模板库放哪""怎么把旧数据搬过来" | 查看存储模式与路径 / 跨盘判定 / 把 `$DSH_HOME/spec-forge` 一次性迁移到当前数据目录 |
 
 注入分三层，成本不同：
 
@@ -211,14 +230,15 @@ dsh --profile web --dump-config | grep spec-forge
 | `retroMinToolCalls` | `2` | 自动复盘要求的最少工具调用数 |
 | `retroRequireCodeChange` | `true` | 沉淀提醒要求真实改过代码，纯问答/只读不提醒 |
 | `strictDistill` | `true` | 提炼时强制要求禁区，空则报错 |
-| `storageHome` | 空 | 自定义数据目录，留空用 `$DSH_HOME/spec-forge` |
+| `storageRoot` | `workspace` | 存储模式：`workspace`（0.3.3 默认，跟工作区）/ `home`（放 `$DSH_HOME`，兼容旧版）/ 设置 `storageHome` 绝对路径时此字段被忽略 |
+| `storageHome` | 空 | 自定义数据目录（绝对路径）。非空时优先于 `storageRoot` |
 
 ---
 
 ## 验证
 
 ```bash
-npm test          # 单元测试：138 个，覆盖指纹/匹配/会话提取/存储/渲染/分类器/沉淀门槛/读缓存/查询聚焦
+npm test          # 单元测试：148 个，覆盖指纹/匹配/会话提取/存储/渲染/分类器/沉淀门槛/读缓存/查询聚焦/路径解析/迁移
 npm run smoke     # 端到端冒烟：沉淀→召回→注入→体检→完成判定→幂等 整条链路
 npm run verify    # 加载验证：mock ctx 执行 apply()，确认工具都能注册、schema 合规
 npm run token-audit # 静态 token 预算审计：常驻/工具定义/SKILL/单次调用产出/真实库命中注入
@@ -255,7 +275,7 @@ npm run token-audit # 静态 token 预算审计：常驻/工具定义/SKILL/单�
 4. **"任务完整结束"是启发式判定**，依据事件流结构判断，准但不敢说绝对可靠。
 5. **急停规则是提示词约束，不是硬拦截。** "提问前不许扫工作区"写死在模型可见的四层文本里，实测有效，但模型仍可能违背——等 dsh 出工具级前置钩子才能根治。
 6. **复杂度分级是启发式。** 写得太短的需求（"加个字段"）会保守判 L2 而非 L1；生僻表述可能漏检，漏了回退 L2，不会默认 L1 瞎干。
-7. **插件与宿主同进程同权限。** 它只读写 `$DSH_HOME/spec-forge`，不联网、不执行 shell、不读凭据；源码公开，装前可自行审查。
+7. **插件与宿主同进程同权限。** 它只读写 `<storageRoot>/spec-forge`（默认 `<启动 dsh 的 cwd>/.dsh-spec-forge/`，可在配置里改成 `$DSH_HOME/spec-forge` 或绝对路径），不联网、不执行 shell、不读凭据；源码公开，装前可自行审查。
 
 ---
 

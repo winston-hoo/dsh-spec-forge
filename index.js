@@ -23,14 +23,19 @@ import { inferQueryCategory } from './lib/classify.js'
 import { rankTemplates } from './lib/match.js'
 import { buildRetroDigest, evaluateRetroEligibility, extractSessionFacts, isSessionComplete } from './lib/extract.js'
 import {
+  bumpWriteEpoch,
   collectRedlines,
+  copyTree,
   dataRoot,
   describeStore,
+  isCrossDrive,
   listTemplates,
   purgeStale,
   readProfile,
   recordHit,
   repoHash,
+  resolveHome,
+  resolveStorageRoot,
   staleTemplates,
   templateId,
   writeProfile,
@@ -57,7 +62,8 @@ export const schema = Schema.object({
   maxInjectTemplates: Schema.number().min(1).max(5).default(2).description('单次最多注入几份历史模板'),
   injectMaxChars: Schema.number().min(500).max(20000).default(4000).description('注入上下文的最大字符数'),
   defaultScope: Schema.union(['project', 'global']).default('project').description('沉淀默认落在项目层还是全局层'),
-  storageHome: Schema.string().default('').description('自定义数据目录，留空则用 $DSH_HOME/spec-forge'),
+  storageHome: Schema.string().default('').description('自定义数据目录（绝对路径）。非空时优先于 storageRoot'),
+  storageRoot: Schema.string().default('workspace').description('存储模式：workspace 跟当前工作目录（推荐，跨盘时避免 EPERM）/home 放 $DSH_HOME（兼容旧版默认）'),
   retroMinToolCalls: Schema.number().min(0).default(2).description('自动复盘要求的最少工具调用次数，低于此值视为未真正动手'),
   retroRequireCodeChange: Schema.boolean().default(true).description('自动沉淀提醒要求本会话真实改过代码（有 edit/write 类工具调用），纯问答/只读诊断不提醒'),
   strictDistill: Schema.boolean().default(true).description('提炼提示词时是否强制要求填写禁区，空则报错'),
@@ -66,8 +72,15 @@ export const schema = Schema.object({
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
 export function apply(ctx, config) {
-  const home = config.storageHome || undefined
-  const root = dataRoot(home)
+  // 顶层确定 home：用户配置 > $DSH_HOME 兜底。process.cwd() 作为 workspace 模式的兜底，
+  // 对 99% 用例（dsh 启动时的 cwd = 工作区）够用；session 级 cwd 由 resolveCwd 工具级处理。
+  const resolvedStorage = resolveStorageRoot({
+    storageHome: config.storageHome,
+    storageRoot: config.storageRoot,
+    cwd: process.cwd(),
+  })
+  const home = resolvedStorage.path
+  const storageMode = resolvedStorage.mode
 
   // 会话级状态：只存标记位，不存内容，避免占用内存与持久化风险
   const state = {
@@ -612,7 +625,150 @@ export function apply(ctx, config) {
     })
   )
 
-  ctx.logger?.info?.(`[spec-forge] 已加载，数据目录 ${root}`)
+  // ---------- 工具 6：存储路径与迁移 ----------
+
+  ctx.tools.register(
+    defineTool({
+      name: 'spec_store',
+      description:
+        '管理 spec-forge 模板库的存储位置。action=info 查看当前模式、数据目录、cwd、跨盘状态、旧 $DSH_HOME 数据量；action=migrate 把 $DSH_HOME/spec-forge/{global,projects/<cwd-hash>} 一次性复制到当前数据目录（同名文件跳过不覆盖，可选 move 删除源）。适用于工作区与 $DSH_HOME 不同盘导致 EPERM、或升级后想把旧数据搬到工作区的用户。',
+      parameters: {
+        action: {
+          type: 'string',
+          required: true,
+          description: "'info' 仅查询；'migrate' 触发迁移（只迁移当前 cwd 对应的项目层 + 全局层）",
+        },
+        cwd: {
+          type: 'string',
+          description: '当前工作目录绝对路径（migrate 时用于定位要迁移的项目层）',
+        },
+        move: {
+          type: 'boolean',
+          description: 'migrate 后是否删除源文件（默认 false = 复制保留源；删除前请确认目标已验证）',
+        },
+      },
+      output: {
+        schema: {
+          type: 'object',
+          additionalProperties: true,
+          properties: {
+            mode: { type: 'string', required: true },
+            storagePath: { type: 'string', required: true },
+            cwd: { type: 'string', required: true },
+            legacyPath: { type: 'string', required: true },
+            crossDrive: { type: 'boolean', required: true },
+            legacy: {
+              type: 'object',
+              additionalProperties: true,
+              properties: {
+                hasData: { type: 'boolean', required: true },
+                projectCount: { type: 'number', required: true },
+                globalCount: { type: 'number', required: true },
+                projectHash: { type: 'string', required: true },
+              },
+            },
+            migration: { type: 'object', additionalProperties: true },
+            report: { type: 'string', required: true },
+          },
+        },
+        render: (_args, value) => [{ type: 'text', text: value.report }],
+      },
+      async execute(args, exec) {
+        const cwd = resolveCwd(args.cwd, exec)
+        const legacyPath = dataRoot(resolveHome())
+        const crossDrive = isCrossDrive(cwd, legacyPath)
+        const projectHash = repoHash(cwd)
+
+        const result = {
+          mode: storageMode,
+          storagePath: home,
+          cwd,
+          legacyPath,
+          crossDrive,
+          legacy: { hasData: false, projectCount: 0, globalCount: 0, projectHash },
+        }
+
+        // info: 扫描旧路径数据量（migrate 之前也复用同一逻辑做预检）
+        try {
+          const srcProj = join(legacyPath, 'projects', projectHash)
+          const srcGlobal = join(legacyPath, 'global')
+          if (existsSync(srcProj)) result.legacy.projectCount = listTemplates(legacyPath, projectHash).length
+          if (existsSync(srcGlobal)) result.legacy.globalCount = listTemplates(legacyPath, 'global').length
+          result.legacy.hasData = result.legacy.projectCount + result.legacy.globalCount > 0
+        } catch (err) {
+          ctx.logger?.warn?.(`[spec-forge] 旧路径扫描失败: ${err.message}`)
+        }
+
+        let migration
+        if (args.action === 'migrate') {
+          const ops = []
+          const srcGlobal = join(legacyPath, 'global')
+          const dstGlobal = join(home, 'global')
+          const srcProj = join(legacyPath, 'projects', projectHash)
+          const dstProj = join(home, 'projects', projectHash)
+          if (existsSync(srcGlobal)) ops.push(copyTree(srcGlobal, dstGlobal, args.move === true))
+          if (existsSync(srcProj)) ops.push(copyTree(srcProj, dstProj, args.move === true))
+          migration = {
+            copied: ops.reduce((n, o) => n + o.copied, 0),
+            skipped: ops.reduce((n, o) => n + o.skipped, 0),
+            deleted: args.move === true ? ops.reduce((n, o) => n + o.copied, 0) : 0,
+            report: ops.map((o) => o.report).filter(Boolean).join('\n') || '(无文件复制)',
+          }
+          bumpWriteEpoch()
+        }
+
+        // 报告渲染
+        const lines = ['## 模板库存储', '']
+        lines.push(`- 模式：\`${storageMode}\``)
+        lines.push(`- 数据目录：\`${home}\``)
+        lines.push(`- 当前工作目录：\`${cwd}\``)
+        lines.push(`- 旧路径（$DSH_HOME/spec-forge）：\`${legacyPath}\``)
+        lines.push(`- 当前项目哈希：\`${projectHash}\``)
+        if (crossDrive) {
+          lines.push('- ⚠️ 检测到跨盘（cwd 与 $DSH_HOME 不在同一盘符）。workspace 模式已规避跨盘写。')
+        } else if (storageMode === 'home') {
+          lines.push('- cwd 与 $DSH_HOME 同盘，home 模式无跨盘风险。')
+        } else {
+          lines.push('- cwd 与 $DSH_HOME 同盘，workspace 模式无跨盘风险。')
+        }
+        lines.push('')
+        lines.push('### 旧路径数据概览')
+        lines.push('')
+        if (result.legacy.hasData) {
+          lines.push(`- 全局层模板：${result.legacy.globalCount}`)
+          lines.push(`- 当前项目层模板：${result.legacy.projectCount}`)
+        } else {
+          lines.push('- 旧路径无数据（global/ 或 projects/<hash> 不存在或为空）')
+        }
+        lines.push('')
+        if (migration) {
+          lines.push('### 迁移结果')
+          lines.push('')
+          lines.push(`- 复制：${migration.copied} 个文件`)
+          lines.push(`- 跳过（目标已存在）：${migration.skipped} 个`)
+          if (migration.deleted > 0) lines.push(`- 删除源文件：${migration.deleted} 个`)
+          if (migration.report) {
+            lines.push('')
+            lines.push('```')
+            lines.push(migration.report)
+            lines.push('```')
+          }
+        } else if (args.action === 'migrate') {
+          lines.push('未发现可迁移的旧数据，迁移执行了 0 次拷贝。')
+        } else {
+          lines.push('如需迁移，调用 `spec_store({ action: "migrate", cwd })`，先复制保留源，确认后再传 `move: true` 删源。')
+        }
+
+        result.migration = migration
+        result.report = lines.join('\n')
+        return result
+      },
+    })
+  )
+
+  ctx.logger?.info?.(
+    `[spec-forge] 已加载，存储模式 ${storageMode}，数据目录 ${home}`
+  )
 }
 
 // ---------- 辅助函数 ----------
