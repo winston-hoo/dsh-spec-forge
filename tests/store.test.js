@@ -1,15 +1,19 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
   ID_PATTERN,
+  STORAGE_MODES,
   assertSafeId,
+  bumpWriteEpoch,
   collectRedlines,
+  copyTree,
   dataRoot,
+  isCrossDrive,
   listTemplates,
   parseFrontmatter,
   parseProfile,
@@ -20,6 +24,7 @@ import {
   recordHit,
   repoHash,
   resolveHome,
+  resolveStorageRoot,
   staleTemplates,
   stringifyFrontmatter,
   templateId,
@@ -330,3 +335,90 @@ test('listTemplates 读缓存：调用方原地排序不污染缓存内容', () 
   assert.equal(again.length, 2)
   assert.deepEqual(again.map((t) => t.name).sort(), ['低命中', '高命中'], '缓存内容不得被调用方污染')
 })
+
+// ---------- 0.3.3：存储路径关键字解析与迁移 ----------
+
+test('resolveStorageRoot：默认 workspace 模式指向 <cwd>/.dsh-spec-forge', () => {
+  const cwd = join(tmpdir(), 'fake-cwd')
+  const r = resolveStorageRoot({ cwd })
+  assert.equal(r.mode, 'workspace')
+  assert.equal(r.path, join(cwd, '.dsh-spec-forge'))
+})
+
+test('resolveStorageRoot：home 模式指向 $DSH_HOME/spec-forge', () => {
+  const r = resolveStorageRoot({ storageRoot: 'home', cwd: tmpdir() })
+  assert.equal(r.mode, 'home')
+  assert.equal(r.path, dataRoot(resolveHome()))
+})
+
+test('resolveStorageRoot：storageHome 非空时优先级最高且原样当绝对路径', () => {
+  const explicit = join(tmpdir(), 'explicit', 'templates')
+  const r = resolveStorageRoot({
+    storageHome: explicit,
+    storageRoot: 'workspace',
+    cwd: tmpdir(),
+  })
+  assert.equal(r.mode, 'explicit')
+  assert.equal(r.path, explicit.replace(/[\\/]$/, ''))
+})
+
+test('resolveStorageRoot：未知关键字抛错并给出可选值', () => {
+  assert.throws(() => resolveStorageRoot({ storageRoot: 'cloud', cwd: tmpdir() }), /未知的 storageRoot/)
+})
+
+test('resolveStorageRoot：空字符串 storageRoot 视为默认 workspace', () => {
+  const cwd = tmpdir()
+  const r = resolveStorageRoot({ storageRoot: '', cwd })
+  assert.equal(r.mode, 'workspace')
+})
+
+test('STORAGE_MODES：仅 workspace 与 home 两种关键字', () => {
+  assert.deepEqual([...STORAGE_MODES], ['workspace', 'home'])
+})
+
+test('isCrossDrive：同盘返回 false；POSIX 永远返回 false', () => {
+  if (process.platform === 'win32') {
+    assert.equal(isCrossDrive('C:/a', 'C:/b'), false)
+    assert.equal(isCrossDrive('C:/a', 'D:/a'), true)
+  }
+  assert.equal(isCrossDrive('/a', '/b'), false)
+})
+
+test('copyTree：递归复制且同名文件跳过不覆盖', () => {
+  const src = mkdtempSync(join(tmpdir(), 'cp-src-'))
+  const dst = mkdtempSync(join(tmpdir(), 'cp-dst-'))
+  mkdirSync(join(src, 'sub'))
+  writeFileSync(join(src, 'a.md'), 'from-src')
+  writeFileSync(join(src, 'sub', 'b.md'), 'nested')
+  writeFileSync(join(dst, 'a.md'), 'preexisting')
+
+  const result = copyTree(src, dst, false)
+  assert.equal(result.copied, 1, 'sub/b.md 复制；a.md 跳过')
+  assert.equal(result.skipped, 1)
+  assert.equal(readFileContent(join(dst, 'a.md')), 'preexisting', '跳过模式下目标不被覆盖')
+  assert.equal(readFileContent(join(dst, 'sub', 'b.md')), 'nested')
+
+  rmSync(src, { recursive: true, force: true })
+  rmSync(dst, { recursive: true, force: true })
+})
+
+test('copyTree：move 模式成功后删除源文件', () => {
+  const src = mkdtempSync(join(tmpdir(), 'mv-src-'))
+  const dst = mkdtempSync(join(tmpdir(), 'mv-dst-'))
+  writeFileSync(join(src, 'x.md'), 'move me')
+  const r = copyTree(src, dst, true)
+  assert.equal(r.copied, 1)
+  assert.equal(existsSync(join(src, 'x.md')), false, '源文件已被删除')
+  rmSync(src, { recursive: true, force: true })
+  rmSync(dst, { recursive: true, force: true })
+})
+
+test('bumpWriteEpoch：返回值递增', () => {
+  const a = bumpWriteEpoch()
+  const b = bumpWriteEpoch()
+  assert.ok(b > a, `bump 应单调递增: ${a} -> ${b}`)
+})
+
+function readFileContent(file) {
+  return readFileSync(file, 'utf8')
+}

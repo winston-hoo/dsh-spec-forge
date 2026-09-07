@@ -3,6 +3,24 @@
 本插件锁定目标 dsh 版本：`@deepseek-ai/dsh` 0.1.x（developer preview，API 可能有破坏性变更）。
 兼容性以实际安装的 profile 依赖树为准。
 
+## 0.3.3 — 2026-09-07
+
+### 新增：模板库跟随工作区（解决跨盘 EPERM）
+
+- **症状**：很多用户的 dsh 工作区在 D/E 盘（如 `D:\document\novels`），但插件的模板库默认写 `$HOME/.dsh/spec-forge/`（C 盘）。dsh 的 `workspace-write` 沙箱会拒绝跨盘写，需要用户手动把插件权限提到全权限（截图里 HaoJun 的反馈就是这个）。
+- **方案**：新增 `storageRoot` 配置字段，取值 `'workspace'`（默认，跟 `<启动 dsh 的 cwd>/.dsh-spec-forge/`）/ `'home'`（兼容 0.3.2 默认）/ 留空 → 旧行为。`storageHome` 绝对路径仍保留作为显式覆盖（优先级最高）。
+- **新增工具 `spec_store`**：查询当前模式 / 跨盘判定 / 旧路径数据量；`migrate` 操作可把 `$DSH_HOME/spec-forge/{global, projects/<cwd-hash>}` 一次性复制（同名文件跳过不覆盖，可选 `move: true` 删源）到当前数据目录。
+- **新工具 helper**：`lib/store.js` 新增 `resolveStorageRoot()` 解析函数、`isCrossDrive()` 跨盘判定、`copyTree()` 递归复制（同名跳过）、`bumpWriteEpoch()` 让 `spec_store` 拷贝文件后强制让进程内读缓存失效。
+- **向后兼容**：旧用户升级后 `storageRoot` 默认改为 `workspace`，**旧 `$DSH_HOME/spec-forge` 数据**留在原处不自动迁移；调 `spec_store({ action: 'info' })` 看一眼，调 `spec_store({ action: 'migrate' })` 一次性拷过去。
+- 测试：138 → 148。新增 `resolveStorageRoot` / `STORAGE_MODES` / `isCrossDrive` / `copyTree` / `bumpWriteEpoch` 共 10 个用例。
+
+### 行为变更
+
+- 旧默认路径 `$DSH_HOME/spec-forge` 不再是默认**新装**用户的目标（仅当用户显式设置 `storageRoot: 'home'` 时使用）。
+- system prompt 路由段描述不变（该段不涉及存储路径）。
+
+---
+
 ## 0.3.2 — 2026-09-05
 
 代码审查驱动的健壮性 & 性能修复（配合 README 去公式化重写），并回应 token 消耗验证结论。
