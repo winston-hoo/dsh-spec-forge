@@ -3,6 +3,35 @@
 本插件锁定目标 dsh 版本：`@deepseek-ai/dsh` 0.1.x（developer preview，API 可能有破坏性变更）。
 兼容性以实际安装的 profile 依赖树为准。
 
+## 0.4.2 — 2026-09-10
+
+**核查「本地装的是不是最新版、能否直接启动」时发现的两处收尾问题。** 0.4.1 的核心修复均正常，这版只收尾，无行为风险。
+
+### 🟡 修复：上移归位后留下空的 `<root>/spec-forge/` 空壳
+
+- **现象**：0.4.1 的 `liftLegacyNesting()` 把子项上移后不清理源目录，实测在 `D:\HBuilderProjects\DSH\deepseek-harness\.dsh-spec-forge\` 下永久留下一个空的 `spec-forge\`。
+- **更隐蔽的一种**：若「新布局已存在」的守卫提前返回（走正常路径），空壳**再也不会**被清理——守卫在归位逻辑之前就退出了。
+- **修复**：上移后 `rmdirSync` 删空目录（非空时自然失败，属预期）；「新布局已在用」分支里也补一次空壳清理。非空旧目录（存在被跳过项）**不删**，旧数据不覆盖。
+- **测试**：+3 条（归位后无空壳 / 新布局在用时清空壳 / 非空旧目录保留且不覆盖）。
+
+### 🟡 修复：README 的「手动覆盖配置」示例是错的，照抄无效
+
+- **现象**：README 给的是缩进块
+  ```yaml
+  spec-forge:
+    storageRoot: workspace
+  ```
+  这既不是 `cordis.patch.yml` 的语法，也误导人以为配置是「合并」进默认值的。
+- **真相**（依据 `apps/cli/src/profile-boot.ts` 的 `PatchOptions = { id, disabled, config? }`，以及 base bundle patch 的官方注释）：`cordis.patch.yml` 是**顶层 YAML 数组**，条目用 `id` 定位到已有行；且 **id 定向补丁会「整体替换」该行的 `config`，而不是合并进它**。照 README 抄不仅静默无效，即使 id 写对、只给一个字段，也会把其余字段压回插件默认值。
+- **修复**：README 新增「手动覆盖配置：改的是 `cordis.patch.yml`」小节，给出可直接用的顶层数组示例（完整重述 11 个配置项）+ `--dump-config` 校验方法；「配置」一节的表述同步纠正。
+- **影响面**：纯文档，无代码变更。
+
+### 验证
+
+- `node --test` → **168 passed / 0 failed**（165 → 168）。
+- `npm run smoke` / `npm run verify` / `npm run token-audit` 全部通过。
+- 装载自检（`dsh-plugin-release-verify`）对安装产物复验通过。
+
 ## 0.4.1 — 2026-09-10
 
 **从线上仓库全新安装 0.4.0 做实机验证时发现的三个缺陷修复。** 安装本身没问题（`dsh plugin add github:…` 3.7 秒通过、bundle 自动挂载、dump-config 正常、5 工具 + 提示段 + 技能均注册、各工具真执行可用），但核心「沉淀 → 复用」闭环实际是断的。

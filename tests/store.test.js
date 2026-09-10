@@ -510,6 +510,49 @@ test('layoutNotice：新位置已有数据时不动旧嵌套目录', () => {
   assert.ok(existsSync(join(nested, 'tpl-bbbbbbbbbb.md')))
 })
 
+// ---------- 0.4.2 回归：上移后不留空壳 ----------
+
+test('layoutNotice：归位后不再遗留空的 <root>/spec-forge 空壳', () => {
+  const nested = join(tmpHome, 'spec-forge')
+  mkdirSync(join(nested, 'projects', 'abc123', 'templates'), { recursive: true })
+  writeFileSync(
+    join(nested, 'projects', 'abc123', 'templates', 'tpl-aaaaaaaaaa.md'),
+    stringifyFrontmatter({ id: 'tpl-aaaaaaaaaa', name: '旧布局模板', scope: 'abc123' }, 'body'),
+  )
+
+  const notice = liftLegacyNesting(tmpHome, { warn() {} })
+  assert.ok(typeof notice === 'string' && notice.length > 0, '应返回归位说明')
+  assert.ok(existsSync(join(tmpHome, 'projects', 'abc123', 'templates', 'tpl-aaaaaaaaaa.md')), '文件应上移一层')
+  assert.ok(!existsSync(nested), '0.4.2 起上移后空目录应被删除（0.4.1 会永久留下空壳）')
+})
+
+test('layoutNotice：新布局已在用时，遗留的空壳也会被清掉', () => {
+  // 复现实测残留：<root>/projects 已在顶层，<root>/spec-forge/ 只剩空目录
+  writeTemplate(tmpHome, 'abc123', templateId('新数据', 'abc123'), { name: '新数据' }, 'body')
+  const nested = join(tmpHome, 'spec-forge')
+  mkdirSync(nested, { recursive: true })
+
+  const notice = liftLegacyNesting(tmpHome, { warn() {} })
+  assert.equal(notice, null, '新布局在用时不上移、不报归位')
+  assert.ok(!existsSync(nested), '空壳应被顺手清掉')
+  assert.equal(listTemplates(tmpHome, 'abc123').length, 1, '新数据不受影响')
+})
+
+test('layoutNotice：旧目录上移后若非空（有跳过项）则保留，不误删数据', () => {
+  // 触发 skip 分支：源目录里有个同名条目已在目标位置存在
+  // （不能拿 global/projects 造，那会被“新布局已存在”的守卫提前拦下）
+  writeFileSync(join(tmpHome, 'stray.txt'), 'root')
+  const nested = join(tmpHome, 'spec-forge')
+  mkdirSync(nested, { recursive: true })
+  writeFileSync(join(nested, 'stray.txt'), 'nested')
+
+  const notice = liftLegacyNesting(tmpHome, { warn() {} })
+  assert.equal(notice, null, '全部跳过时无归位动作')
+  assert.ok(existsSync(join(nested, 'stray.txt')), '非空旧目录不得被删除')
+  assert.equal(readFileContent(join(nested, 'stray.txt')), 'nested', '旧数据不被覆盖')
+  assert.equal(readFileContent(join(tmpHome, 'stray.txt')), 'root', '目标数据不被覆盖')
+})
+
 function readFileContent(file) {
   return readFileSync(file, 'utf8')
 }
