@@ -137,14 +137,37 @@ L1 还有一张"保守默认表"兜底：列表默认不展示新列、默认不
 跨盘写会触发 dsh 的 `workspace-write` 沙箱 EPERM（用户常反馈的"C 盘被拒绝"就是这个）。**新装用户无须配置**——0.3.3 起默认跟随工作区；老用户升级后如果还在用旧路径，调用 `spec_library({ action: 'info' })` 即可看到当前模式与路径，必要时调 `spec_library({ action: 'migrate' })` 把 `$DSH_HOME/spec-forge` 拷过来（默认复制保留源，验证后再传 `move: true` 删除源）。
 
 > **0.4.1 布局修正**：0.3.3/0.4.0 因把已是数据根的 `home` 又追加了一层，数据实际落在 `<root>/spec-forge/…`（`home` 模式下导致历史模板全部读不到、`migrate` 写到了插件不读的位置）。0.4.1 起 `<root>` 即数据根，与实际目录一致；启动时会自动把遗留的 `<root>/spec-forge/…` 一次性上移归位（新位置已有数据则不动）。若你在此期间用过 `workspace` 模式，无需手工处理。
+>
+> **0.4.2**：上移归位后若源目录已空，会顺手删掉它——0.4.1 会在曾踩坑的机器上永久留下一个 `<root>/spec-forge/` 空壳。
 
-profile YAML 里手动覆盖：
+### 手动覆盖配置：改的是 `cordis.patch.yml`
+
+profile 的行配置**不是**写成一个 `spec-forge:` 缩进块，而是改在 profile 目录的 patch 文件里，且它必须是**顶层 YAML 数组**：
+
+```
+~/.dsh/profiles/<profile>/cordis.patch.yml
+```
 
 ```yaml
-spec-forge:
-  storageRoot: workspace   # 或 home，或省略
-  storageHome: ''          # 非空则强制覆盖 storageRoot；建议留空
+# 顶层数组；条目用 id 定位到已有行。
+# ⚠️ id 定向补丁会「整体替换」该行的 config，不是合并——
+#    所以下面必须完整重述所有字段，否则漏掉的字段会回落到插件默认值。
+- id: spec-forge
+  config:
+    autoRecall: true
+    autoRetro: true
+    matchThreshold: 0.35
+    maxInjectTemplates: 2
+    injectMaxChars: 4000
+    defaultScope: project
+    storageRoot: home          # 改这里：workspace（默认）| home
+    storageHome: ''            # 非空则强制覆盖 storageRoot；建议留空
+    retroMinToolCalls: 2
+    retroRequireCodeChange: true
+    strictDistill: true
 ```
+
+改完重启 dsh，用 `dsh --profile <profile> --dump-config` 确认 `# == dsh-spec-forge` 段里的值与预期一致。
 
 **模板库也会旧。** `spec_library` 会统计超过 90 天未被命中的过期模板并列出名字——模板不是越多越好，旧模板会稀释召回精度。但它只报告不擅自动手，**只有你明确说"清理过期模板"才会物理删除**（删了不可恢复）。
 
@@ -251,7 +274,7 @@ pnpm dsh --profile web --dump-config | Select-String spec-forge
 
 ## 配置
 
-在 profile 的 `cordis.patch.yml` 中调整，均有默认值：
+在 profile 的 `cordis.patch.yml` 中调整（写法见上文「手动覆盖配置」小节——**id 定向补丁会整体替换 config，必须完整重述所有字段**），均有默认值：
 
 | 配置 | 默认 | 说明 |
 | --- | --- | --- |
@@ -272,7 +295,7 @@ pnpm dsh --profile web --dump-config | Select-String spec-forge
 ## 验证
 
 ```bash
-npm test          # 单元测试：165 个，覆盖指纹（含序列化回归）/匹配/会话提取/存储（含布局回归）/渲染/分类器/沉淀门槛/读缓存/查询聚焦/路径解析/迁移
+npm test          # 单元测试：168 个，覆盖指纹（含序列化回归）/匹配/会话提取/存储（含布局与空壳回归）/渲染/分类器/沉淀门槛/读缓存/查询聚焦/路径解析/迁移
 npm run smoke     # 端到端冒烟：沉淀→召回→注入→体检→完成判定→幂等 整条链路
 npm run verify    # 加载验证：mock ctx 执行 apply()，确认工具都能注册、schema 合规
 npm run token-audit # 静态 token 预算审计：常驻/工具定义/SKILL/单次调用产出/真实库命中注入
