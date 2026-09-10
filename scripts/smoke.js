@@ -3,7 +3,7 @@
 //
 //   node scripts/smoke.js
 
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -15,6 +15,7 @@ import {
   listTemplates,
   recordHit,
   repoHash,
+  sep,
   templateId,
   writeProfile,
   writeTemplate,
@@ -59,7 +60,9 @@ try {
       name: templateName,
       category: 'feature/api',
       tags: ['java', 'spring-boot', 'pagination'],
-      fingerprint: fingerprint(`${templateName} 分页查询接口 MyBatis-Plus`).map(({ token, weight }) => `${token}|${weight}`),
+      // 故意传「对象数组」（与 spec_retro 的真实调用保持一致），序列化交给 writeTemplate。
+      // 测试自己手工拼 `${token}|${weight}` 会掩盖序列化缺陷（0.4.0 的 [object Object] 就是这么漏掉的）。
+      fingerprint: fingerprint(`${templateName} 分页查询接口 MyBatis-Plus`),
     },
     body
   )
@@ -75,6 +78,14 @@ try {
   check('模板已落盘', stored.length === 1, `当前 ${stored.length} 份`)
   check('模板 ID 合法', stored[0]?.id === id, stored[0]?.id)
 
+  // 0.4.1 回归：指纹必须真实可用，而不是一串 '[object Object]'
+  const fp = stored[0]?.fingerprint ?? []
+  const fpBad = fp.filter((f) => !f.token || String(f.token).includes('object')).length
+  check('模板指纹可解析', fp.length > 0 && fpBad === 0, `${fp.length} 项，损坏 ${fpBad} 项`)
+  const rawFile = readFileSync(stored[0].file, 'utf8')
+  check('落盘无 [object Object]', !rawFile.includes('[object Object]'))
+  check('落盘层级正确（无多余 spec-forge）', stored[0].file.startsWith(home) && !stored[0].file.slice(home.length).startsWith(`${sep}spec-forge${sep}`), stored[0].file)
+
   console.log('\n=== 2. 召回：同类需求应命中 ===\n')
 
   const similarQuery = '在 UserController 里加一个支持分页的查询接口'
@@ -85,6 +96,7 @@ try {
     threshold: 0.35,
   })
   check('同类需求命中', similarResults[0]?.hit === true, `得分 ${similarResults[0]?.score}`)
+  check('同类需求靠词汇相似度命中（而非仅靠元数据）', (similarResults[0]?.breakdown?.lexical ?? 0) > 0, `lexical=${similarResults[0]?.breakdown?.lexical}`)
 
   recordHit(home, scope, id)
   const afterHit = listTemplates(home, scope)[0]

@@ -3,6 +3,49 @@
 本插件锁定目标 dsh 版本：`@deepseek-ai/dsh` 0.1.x（developer preview，API 可能有破坏性变更）。
 兼容性以实际安装的 profile 依赖树为准。
 
+## 0.4.1 — 2026-09-10
+
+**从线上仓库全新安装 0.4.0 做实机验证时发现的三个缺陷修复。** 安装本身没问题（`dsh plugin add github:…` 3.7 秒通过、bundle 自动挂载、dump-config 正常、5 工具 + 提示段 + 技能均注册、各工具真执行可用），但核心「沉淀 → 复用」闭环实际是断的。
+
+### 🔴 修复：`spec_retro` 写出的指纹是垃圾，沉淀的模板永远无法被召回
+
+- **现象**：模板 frontmatter 的 `fingerprint` 被写成 `'[object Object]'` × N。
+- **根因**：`spec_retro` 把 `fingerprint()` 返回的 `{token, weight}` 对象数组直接交给 `writeTemplate`，而 `stringifyFrontmatter` 用 `String(value)` 序列化对象 → `'[object Object]'`。读回时 `normalizeFingerprint` 得到 `{token: '[object Object]', weight: 1}`，导致 `cosine=coverage=lexical=0`、`score` 只有 0.136，**永远无法达到 0.35 阈值**。
+- **连带风险**：`recordHit` 会用 `readTemplate` 读出的对象指纹再写回，**首次命中就会把原本健康的旧模板一起写坏**（用户库里 7 份真实模板此前 `hitCount` 全为 0，才侥幸未被破坏）。
+- **修复**：`writeTemplate` 统一走新增的 `serializeFingerprint()`，把 `{token, weight}` 与 `'token|weight'` 两种输入都规范成 `token|weight` 字符串落盘；非法项丢弃而不是写坏。
+- **为什么测试没拦住**：`smoke.js` 与单测都自己手工拼了 `` `${token}|${weight}` ``，绕过了 `spec_retro` 这条真实路径。冒烟已改为传对象数组，并新增「指纹可解析」「落盘无 `[object Object]`」「命中必须来自词汇相似度（`lexical > 0`）」三条断言。
+
+### 🔴 修复：存储根多嵌套一层 `spec-forge`，历史模板全部失联、迁移无效
+
+- **现象**：数据实际落在 `<root>/spec-forge/{global,projects}`，而 `spec_library({action:'migrate'})` 却写到 `<root>/{global,projects}` —— 读写路径不一致。
+- **根因**：0.3.3 把 `home` 从 `$DSH_HOME` 改成 `resolveStorageRoot().path`（**本身已是数据根**），但 `scopeDir()` 与 `describeStore()` 仍按「home 目录」处理，继续调用 `dataRoot()` 追加一层 `spec-forge`。
+- **实证后果**：
+  - `listTemplates('~/.dsh/spec-forge', '<repo>')` 返回 **0 份**，而磁盘上明明有 5 份 → 升级到 0.3.3+ 后**历史模板再也不会被召回**（这解释了一段时间以来「召回质量不高」的观感）。
+  - `home` 模式（`storageRoot: 'home'`）同样失效，且与 0.3.2 及更早的数据位置不兼容。
+  - `info` 的「旧路径数据概览」经 `listTemplates` 统计，恒报「旧路径无数据」。
+  - `migrate` 报告「已复制 N 个文件」但插件读不到 —— 迁移形同虚设。
+- **修复**：`scopeDir()` / `describeStore()` 不再重复调用 `dataRoot()`，**`home` 即数据根**。三种模式恢复到文档描述的语义：`workspace` → `<cwd>/.dsh-spec-forge/`、`home` → `$DSH_HOME/spec-forge/`、`storageHome` → 你给的绝对路径。
+- **一次性归位**：新增 `liftLegacyNesting()`，插件启动时若发现 0.3.3/0.4.0 遗留的 `<root>/spec-forge/…` 且新位置为空，就把子项 `rename` 上移一层（目标已存在则跳过，不覆盖）。失败只告警，不影响其余功能。
+- **验证**：真实库 `~/.dsh/spec-forge` 从「模板数 0」恢复为 5 / 1 / 1，相关需求重新命中（0.441 / 0.51）。
+
+### 🟡 修复：README 的验证命令在 PowerShell 下不可用
+
+- 原文 `dsh --profile web --dump-config | grep spec-forge`：`grep` 是 Unix 命令，PowerShell 需 `Select-String`；且 `dsh` 通常不在 PATH，应经 `pnpm dsh`。已改为同时给出 Bash 与 PowerShell 两种写法。
+
+### 测试与文档
+
+- 测试：158 → **165**。新增指纹序列化（对象/字符串/脏数据）、`recordHit` 不破坏指纹、`home` 即数据根、旧布局归位、新位置有数据时不归位 共 7 个用例；3 个构造磁盘布局的旧用例改到新语义。
+- `scripts/smoke.js`：改用真实调用形态传指纹 + 4 条新断言。
+- `scripts/token-audit.js`：真实库路径构造对齐「home 即数据根」。
+
+### 兼容性
+
+- **`home` 模式（以及从 ≤0.3.2 升级的用户）**：本版起数据位置回到 `$DSH_HOME/spec-forge/`，历史模板重新可见。**这是恢复而非破坏。**
+- **0.3.3/0.4.0 期间在 `workspace` 模式下写入的数据**：位于 `<cwd>/.dsh-spec-forge/spec-forge/`，启动时会被一次性上移到 `<cwd>/.dsh-spec-forge/`，无需手工干预。
+- **已被 `[object Object]` 写坏的模板指纹无法自动恢复**，需重新沉淀一次（同名覆盖）或手工把该字段改回 `token|weight` 形式。检测方法：搜索模板文件里的 `[object Object]`。
+
+---
+
 ## 0.4.0 — 2026-09-10
 
 成本归因驱动的「少追问、少烧 token」版本。起因是一次真实会话（youting，620K 日志、482 事件）被逐事件解码后，发现一次简单的需求花了 1.41 元调度费且需返工。归因结论：**插件只占约 4% 成本，整读大文件才是大头（≈50%）**；但插件确实存在「简单需求被反复追问」的体验问题。本版把两类问题一起治。

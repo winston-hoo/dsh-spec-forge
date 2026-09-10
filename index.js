@@ -29,6 +29,7 @@ import {
   dataRoot,
   describeStore,
   isCrossDrive,
+  liftLegacyNesting,
   listTemplates,
   purgeStale,
   readProfile,
@@ -81,6 +82,11 @@ export function apply(ctx, config) {
   })
   const home = resolvedStorage.path
   const storageMode = resolvedStorage.mode
+
+  // 0.4.1：把 0.3.3/0.4.0 误生成的 `<root>/spec-forge/…` 布局一次性归位到 `<root>/…`。
+  // 只在检测到旧嵌套且新位置为空时动手，失败仅告警、不影响插件其余功能。
+  const layoutNotice = liftLegacyNesting(home, ctx.logger)
+  if (layoutNotice) ctx.logger?.info?.(`[spec-forge] ${layoutNotice}`)
 
   // 会话级状态：只存标记位，不存内容，避免占用内存与持久化风险
   const state = {
