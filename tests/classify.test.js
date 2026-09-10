@@ -183,3 +183,75 @@ test('inferQueryCategory：判不出来返回 undefined（宁可不加分）', (
   assert.equal(inferQueryCategory(''), undefined)
   assert.equal(inferQueryCategory('随便聊聊天气'), undefined)
 })
+
+// ---------- fastTrack 快速通道（0.4.0） ----------
+
+test('classifyComplexity：跳过词命中时 fastTrack=true（无条件快速通道）', () => {
+  for (const text of SKIP_TRIGGERS.map((t) => `改一下这个，${t}`)) {
+    const r = classifyComplexity(text)
+    assert.equal(r.fastTrack, true, `跳过词必须 fastTrack：${text}`)
+  }
+})
+
+test('classifyComplexity：L1 单字段 CRUD 的 fastTrack=true', () => {
+  const r = classifyComplexity('增加一个主管管员字段 isMainAdmin，开关，默认否')
+  assert.equal(r.level, 1)
+  assert.equal(r.fastTrack, true)
+})
+
+test('classifyComplexity：自包含新建 + 参考物 => L1 fastTrack', () => {
+  const cases = [
+    '参考用户管理页面，新建一个订单列表页面',
+    '参考 index.vue 新增一个搜索表单组件',
+    '仿照现有的详情页做一个合同详情页',
+    '参照 parking-materials.html 做一个类似的停车材料页面',
+  ]
+  for (const text of cases) {
+    const r = classifyComplexity(text)
+    assert.equal(r.level, 1, `应判 L1：${text}`)
+    assert.equal(r.fastTrack, true, `应开启快速通道：${text}`)
+    assert.ok(r.signals.includes('L1:self-contained'))
+    assert.ok(r.signals.includes('L1:has-reference'))
+  }
+})
+
+test('classifyComplexity：裸新建页面（无参考物）落到 L2，不误开快速通道', () => {
+  for (const text of ['新建一个页面', '做一个新的报表页面', '新建一个数据表格页面']) {
+    const r = classifyComplexity(text)
+    assert.equal(r.level, 2, `无参考物应落 L2：${text}`)
+    assert.equal(r.fastTrack, false, `不应 fastTrack：${text}`)
+  }
+})
+
+test('classifyComplexity：L2 默认与 L3 架构均 fastTrack=false', () => {
+  assert.equal(classifyComplexity('随便优化一下性能').fastTrack, false)
+  assert.equal(classifyComplexity('把用户模块重构拆分为独立服务').fastTrack, false)
+})
+
+test('classifyComplexity：DDL 真信号仍判 L3', () => {
+  for (const text of ['新建订单表', '建表 t_user', '新建用户表结构', '新增数据库', 'alter table user add col']) {
+    const r = classifyComplexity(text)
+    assert.equal(r.level, 3, `DDL 应判 L3：${text}`)
+    assert.ok(r.signals.includes('L3:ddl'))
+  }
+})
+
+test('classifyComplexity：DDL 不误伤"列表页/表单/报表/表格"等前端复合词（0.4.0 修复）', () => {
+  const cases = [
+    ['参考用户管理页面，新建一个订单列表页面', 'L1:self-contained'],
+    ['参考 index.vue 新增一个搜索表单组件', 'L1:self-contained'],
+    ['参考订单页做一个报表页面', 'L1:self-contained'],
+    ['参考列表页新建一个数据表格页面', 'L1:self-contained'],
+  ]
+  for (const [text, signal] of cases) {
+    const r = classifyComplexity(text)
+    assert.notEqual(r.level, 3, `不应被误判为 L3/DDL：${text}`)
+    assert.ok(r.signals.includes(signal), `应含 ${signal}：${text}`)
+  }
+})
+
+test('classifyComplexity：DDL 前后视断言不影响"参考列表页做表格"一类的自包含判定', () => {
+  const r = classifyComplexity('参考现有列表页，新建一个订单表格组件')
+  assert.equal(r.level, 1)
+  assert.equal(r.fastTrack, true)
+})

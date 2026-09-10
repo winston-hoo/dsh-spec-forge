@@ -4,11 +4,20 @@ import assert from 'node:assert/strict'
 import { SECTIONS, renderInjection, renderTemplateMarkdown, renderTriageReport, sectionOf, triageRequirement } from '../lib/render.js'
 import { parseFrontmatter } from '../lib/store.js'
 
-test('triageRequirement：过短的需求必须澄清', () => {
+test('triageRequirement：过短且零锚点的空需求触发 L2 安全阀（问一次）', () => {
   const r = triageRequirement('帮我改一下')
   assert.equal(r.tooShort, true)
-  assert.equal(r.needsClarify, true)
+  assert.equal(r.classification.level, 2)
+  assert.equal(r.unactionable, true)
+  assert.equal(r.needsClarify, true, '0.4.0：空需求务必先问一次，避免盲目套默认值返工')
   assert.equal(r.ready, false)
+})
+
+test('triageRequirement：有锚点的 L2 需求不追问、按默认执行', () => {
+  const r = triageRequirement('在 UserController.java 帮我做一下用户列表的导出优化，需要支持 Excel 和 CSV')
+  assert.equal(r.classification.level, 2)
+  assert.equal(r.unactionable, false)
+  assert.equal(r.needsClarify, false, '0.4.0：可自举的 L2 一律按默认执行')
 })
 
 test('triageRequirement：四要素齐全时判定为可直接开工', () => {
@@ -24,7 +33,7 @@ test('triageRequirement：未说明禁区时识别为缺失', () => {
   const r = triageRequirement('在 src/main/java/UserController.java 里加一个查询接口，要能分页')
   const boundary = r.dimensions.find((d) => d.key === 'boundary')
   assert.equal(boundary.status, 'missing')
-  assert.equal(r.needsClarify, true)
+  assert.equal(r.needsClarify, false, '0.4.0：缺失项不再触发追问，L2 按默认执行')
 })
 
 test('triageRequirement：提到禁区关键词即判定为已明确', () => {
@@ -46,41 +55,54 @@ test('triageRequirement：中英混排的验收信号都能识别', () => {
   assert.equal(triageRequirement('改一下 a').dimensions.find((d) => d.key === 'goal').status, 'missing')
 })
 
-test('triageRequirement：空输入不抛错', () => {
+test('triageRequirement：空输入不抛错，且触发安全阀要求澄清', () => {
   const r = triageRequirement('')
   assert.equal(r.length, 0)
-  assert.equal(r.needsClarify, true)
+  assert.equal(r.unactionable, true)
+  assert.equal(r.needsClarify, true, '0.4.0：空需求必须问清目标')
   assert.equal(r.ready, false)
 })
 
-test('renderTriageReport：输出表格与缺失项清单', () => {
-  const r = triageRequirement('帮我改一下')
+test('triageRequirement：信息不足的空需求报告输出 L2 安全阀追问区', () => {
+  const r = triageRequirement('帮我改一下那个查询')
+  assert.equal(r.needsClarify, true)
+  const report = renderTriageReport(r)
+  assert.ok(report.includes('Level 2'), '必须标注 Level 2')
+  assert.ok(report.includes('L2 信息不足'), '必须出现安全阀标题')
+  assert.ok(report.includes('需要先向你确认'), '安全阀必须列追问清单')
+  assert.ok(report.includes('不要反复追问'), '必须约束只问一次')
+})
+
+test('renderTriageReport：有锚点的 L2 输出按默认执行区域，不列问题', () => {
+  const r = triageRequirement('在 UserController.java 帮我做一下用户列表的导出优化，需要支持 Excel 和 CSV')
+  assert.equal(r.classification.level, 2)
   const report = renderTriageReport(r)
   assert.ok(report.includes('需求完整度体检'))
-  assert.ok(report.includes('需要先向你确认'))
+  assert.ok(report.includes('已按默认执行'))
+  assert.ok(!report.includes('需要先向你确认'), 'L2 可自举时禁止输出追问清单')
   assert.ok(report.includes('要实现什么'))
   assert.ok(report.includes('要怎么改'))
   assert.ok(report.includes('哪些不能改'))
 })
 
-test('renderTriageReport：需求不完整时必须输出先问后查的急停指令', () => {
-  const r = triageRequirement('帮我改一下')
+test('renderTriageReport：L3 必须输出先问后查约束与禁止工具清单', () => {
+  const r = triageRequirement('需要重构整个用户中心，跨文件跨模块')
+  assert.equal(r.classification.level, 3)
   const report = renderTriageReport(r)
-  assert.ok(report.includes('急停'), '必须出现急停标识')
   assert.ok(report.includes('先问后查'), '必须出现先问后查约束')
   assert.ok(report.includes('禁止调用任何文件类工具'), '必须列明禁止的文件工具')
   assert.ok(report.includes('read_file') && report.includes('grep'), '必须点名 read_file/grep 等具体工具')
 })
 
-test('renderTriageReport：需求齐全时不出现急停指令', () => {
+test('renderTriageReport：L2 需求齐全时按默认执行、不出现追问清单', () => {
   const r = triageRequirement('在 src/main/java/UserController.java 新增分页查询接口，不要修改 common/Result.java 的返回结构，需要 mvn test 通过')
   const report = renderTriageReport(r)
-  assert.ok(!report.includes('急停'))
-  assert.ok(report.includes('可以直接进入实现阶段'))
+  assert.ok(!report.includes('需要先向你确认'))
+  assert.ok(report.includes('已按默认执行'))
 })
 
 test('renderTriageReport：L2 不再附带历史模板提示（避免与分类器推断值重复）', () => {
-  const r = triageRequirement('帮我改一下')
+  const r = triageRequirement('在 UserController.java 帮我做一下用户列表的导出优化，需要支持 Excel 和 CSV')
   assert.equal(r.classification.level, 2)
   const report = renderTriageReport(r, { templateHints: ['分页参数是 pageNum/pageSize 还是 offset/limit？'] })
   assert.ok(report.includes('Level 2'), '必须标注 Level 2')
@@ -127,26 +149,23 @@ test('renderTriageReport：Level 1 跳过词场景输出明确的"已跳过追�
   assert.ok(report.includes('直接执行清单'))
 })
 
-test('renderTriageReport：Level 2 模块变更——问题数上限 3 条且附带推断默认值', () => {
+test('renderTriageReport：Level 2 按默认执行、不再输出追问清单', () => {
   const r = triageRequirement('在 UserController.java 帮我做一下用户列表的导出优化，需要支持 Excel 和 CSV')
   assert.equal(r.classification.level, 2, `必须判定为 L2，signals=${r.classification.signals.join(',')}`)
   const report = renderTriageReport(r)
   assert.ok(report.includes('Level 2'))
-  // 问题数不应超过 L2_MAX_QUESTIONS
-  const questionsSection = report.split('需要先向你确认')[1] || ''
-  const questionsList = (questionsSection.match(/^- \*\*/gm) || []).length
-  assert.ok(questionsList <= 3, `L2 追问数应 ≤ 3，实际 ${questionsList}`)
-  assert.ok(report.includes('已从需求中推断出'), 'L2 必须附带"已从需求中推断出"区域')
+  assert.ok(report.includes('已按默认执行'), 'L2 必须输出"已按默认执行"区域')
+  assert.ok(!report.includes('需要先向你确认'), 'L2 禁止输出追问清单')
   assert.ok(report.includes('UserController.java'), '推断的文件路径必须出现')
 })
 
-test('renderTriageReport：Level 3 架构重构——问题数无上限', () => {
+test('renderTriageReport：Level 3 架构重构保留完整追问', () => {
   const r = triageRequirement('需要重构整个用户中心，跨文件跨模块')
   assert.equal(r.classification.level, 3)
   const report = renderTriageReport(r)
   assert.ok(report.includes('Level 3'))
-  assert.ok(report.includes('急停'), 'L3 仍保留急停指令')
-  assert.ok(report.includes('先问后查'), 'L3 仍保留先问后查约束')
+  assert.ok(report.includes('先问后查'), 'L3 保留先问后查约束')
+  assert.ok(report.includes('需要先向你确认'), 'L3 仍输出追问清单')
   assert.ok(report.includes('禁止调用任何文件类工具'), 'L3 仍列明禁止的文件工具')
 })
 

@@ -54,7 +54,16 @@ if (sysMatch) {
   const lines = [...sysMatch[1].matchAll(/'((?:[^'\\]|\\.)*)'/g)].map((m) => m[1])
   sysText = lines.join('\n')
 }
-out.push(row('① 常驻系统提示词段 spec-forge:routing', sysText.length, estTokens(sysText), '每轮请求都带，~280 token 预算内'))
+const sysToks = estTokens(sysText)
+const SYS_BUDGET = 450
+out.push(
+  row(
+    '① 常驻系统提示词段 spec-forge:routing',
+    sysText.length,
+    sysToks,
+    sysToks <= SYS_BUDGET ? `每轮请求都带（预算 ≤${SYS_BUDGET}）` : `⚠️ 超出预算 ${SYS_BUDGET}`,
+  ),
+)
 
 // ---------- 2. 五个工具的 defineTool 定义（近似序列化体量） ----------
 const toolBlocks = {}

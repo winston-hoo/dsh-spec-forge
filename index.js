@@ -11,7 +11,7 @@
 //   systemPrompt —— 可选，用 ctx.get 探测
 //   skills       —— 可选，用 ctx.get 探测
 
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -19,7 +19,7 @@ import Schema from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 
 import { fingerprint, focusFingerprint, inferQueryTags } from './lib/fingerprint.js'
-import { inferQueryCategory } from './lib/classify.js'
+import { classifyComplexity, inferQueryCategory } from './lib/classify.js'
 import { rankTemplates } from './lib/match.js'
 import { buildRetroDigest, evaluateRetroEligibility, extractSessionFacts, isSessionComplete } from './lib/extract.js'
 import {
@@ -96,19 +96,16 @@ export function apply(ctx, config) {
       order: 150,
       text: [
         '## 需求锻造（spec-forge）',
-        '编程类需求按序执行：spec_recall → spec_triage → 澄清/直接做 → spec_distill → 实现 → spec_retro。',
-        '1. 先 spec_recall 检索历史模板与项目禁区，再动手。',
-        '2. spec_triage 体检并定 Level，严格按等级响应：',
-        '   L1 原子操作：照报告"直接执行清单"直接改（扫目标文件近 50 行表单代码自举），不许追问；',
-        '     疑虑用 `// TODO: [待确认]` 标注并在报告里点出。',
-        '   L2 模块变更：最多 3 问，默认值随问题给出，不答复按默认执行。',
-        '   L3 架构重构：完整 Grill-me，不限问数。',
-        '   消息含"直接做/速做/不用问/别问/不要问/极速模式"任一 → 无条件 L1。',
-        '   **急停（无条件）**：提问前禁止调用任何文件类工具（read_file/grep/glob/find/bash/ls/tree 等），不预扫工作区。',
-        '3. 澄清完调 spec_distill 生成结构化提示词，作为实现依据。',
-        '4. 任务链收尾（改码完成且验证通过）后调 spec_retro 沉淀一次，链内小修合并；',
-        '   先过复用价值三问（还会照做吗/结论跨项目成立吗/会反复提吗）；纯问答、只读、一次性改动不调；用户明确要求时无条件调。',
-        '禁区（项目档案或模板注入）是硬约束，一律不得修改。',
+        '编程需求：spec_recall →（按需 spec_triage / spec_distill）→ 实现 → 收尾 spec_retro。',
+        '1. 先 spec_recall（传原文），返回历史模板、项目禁区与 fastTrack。',
+        '2. fastTrack=true（L1）：禁止追问，跳过 triage/distill，直接实现；疑虑写 `// TODO: [待确认]` 并在报告点出。',
+        '   否则看 spec_triage 等级：L2 按报告默认值执行、禁止追问（仅"过短且零锚点"会让你一次问清再动手）；',
+        '   L3 完整先问后查。含"直接做/速做/不用问/别问/不要问/极速模式"→ 无条件 fastTrack。',
+        '   仅 L3 与 L2 安全阀可 ask_user_question；提问前禁用任何文件类工具（read/grep/glob/bash/ls），一次问完。',
+        '3. 大文件纪律：>20K 字符的文件禁止整文件 read，先 grep 定位再分段读；确需整读先落要点摘要。',
+        '4. 收尾过复用价值三问（还会照做/跨项目成立/会反复提）后 spec_retro 一次；纯问答、只读诊断、',
+        '   报错排查、环境修复不沉淀；用户明确要求时无条件沉淀。',
+        '禁区（项目档案/模板注入）是硬约束，不得修改。',
       ].join('\n'),
     })
   }
@@ -143,7 +140,7 @@ export function apply(ctx, config) {
     defineTool({
       name: 'spec_recall',
       description:
-        '检索历史提示词模板库。当用户提出编程需求（新增功能、修改、重构、修 Bug、样式调整等）时，在任何代码改动之前调用。返回命中的历史模板（澄清清单、标准改法、验收标准）与本项目禁区。这是硬性前置步骤。',
+        '检索历史提示词模板库，返回命中模板（澄清清单/标准改法/验收标准）、本项目禁区，以及复杂度分级（level 与 fastTrack）。用户提出编程需求时在任何代码改动之前调用，是硬性前置步骤。',
       parameters: {
         requirement: {
           type: 'string',
@@ -165,6 +162,8 @@ export function apply(ctx, config) {
             redlines: { type: 'array' },
             templates: { type: 'array' },
             notice: { type: 'string' },
+            level: { type: 'number', description: '复杂度等级 1|2|3' },
+            fastTrack: { type: 'boolean', description: 'true 时可跳过 spec_triage 与 spec_distill，直接实现' },
           },
         },
         render: (_args, value) => [{ type: 'text', text: value.context + (value.notice ? `\n\n${value.notice}` : '') }],
@@ -175,6 +174,7 @@ export function apply(ctx, config) {
 
         const templates = listTemplates(home, scope)
         const queryFp = buildQueryFp(args.requirement)
+        const classification = classifyComplexity(args.requirement)
 
         // 先对全部模板打分（不截断），把每一份过线模板都记一次命中——
         // 热度加成才反映真实分布。旧版只遍历截断后的前 N 名，第 3 名之后
@@ -194,12 +194,24 @@ export function apply(ctx, config) {
         const hitTemplates = results.filter((r) => r.hit)
         const redlines = collectRedlines(home, scope, hitTemplates.map((r) => r.template))
 
-        const context = renderInjection({
+        const injection = renderInjection({
           results,
           redlines,
           maxTemplates: config.maxInjectTemplates,
           maxChars: config.injectMaxChars,
         })
+
+        // 0.4.0：召回时顺带给出复杂度分级 —— L1 据此可跳过 spec_triage/spec_distill 两次往返
+        const level = classification.level
+        const fastTrack = classification.fastTrack === true
+        const levelLine = fastTrack
+          ? '> **分级：L1 快速通道（fastTrack=true）** —— 禁止追问；跳过 spec_triage 与 spec_distill，直接实现。\n\n'
+          : `> **分级：L${level}** —— ${
+              level === 3
+                ? 'L3 架构重构，先问后查（可 ask_user_question）。'
+                : 'L2 模块变更，按报告默认值执行、禁止追问。'
+            }\n\n`
+        const context = levelLine + injection
 
         const notice = buildRecallNotice(exec, state, config)
 
@@ -215,6 +227,8 @@ export function apply(ctx, config) {
             hit: r.hit,
           })),
           notice,
+          level,
+          fastTrack,
         }
       },
     })
@@ -226,7 +240,7 @@ export function apply(ctx, config) {
     defineTool({
       name: 'spec_triage',
       description:
-        '对用户需求做四维完整度体检（要实现什么/怎么改/哪些不能改/上下文），报告标注 Level 并按级行动：L1 原子操作输出"直接执行清单"+风格自举要求，禁止追问；L2 模块变更最多 3 问（报告已给默认值，不答复按默认执行）；L3 架构重构完整 Grill-me。消息含"直接做/速做/不用问/别问/不要问/极速模式"任一 → 无条件 L1。',
+        '四维需求体检（要实现什么/怎么改/哪些不能改/上下文）并标注 Level，返回可直接执行的报告：L1 出执行清单（禁追问）；L2 出默认值清单（按默认执行、禁追问，仅"过短且零锚点"时转为一次性追问）；L3 出完整追问清单。仅当 spec_recall 返回 fastTrack=false 时调用。',
       parameters: {
         requirement: {
           type: 'string',
@@ -243,7 +257,7 @@ export function apply(ctx, config) {
           type: 'object',
           additionalProperties: true,
           properties: {
-            mode: { type: 'string', required: true, description: 'fast-track(L1) | clarify(L2/L3 待追问) | ready(可直接实现)' },
+            mode: { type: 'string', required: true, description: 'fast-track(L1 直接实现) | clarify(需一次性问清) | ready(可直接实现)' },
             level: { type: 'number', required: true, description: '复杂度等级 1|2|3' },
             needsClarify: { type: 'boolean', required: true },
             ready: { type: 'boolean', required: true },
@@ -283,7 +297,10 @@ export function apply(ctx, config) {
           needsClarify: result.needsClarify,
           ready: result.ready,
           report,
-          questions: [...result.missing, ...result.partial].map((d) => `${d.label}：${d.question}`),
+          // 仅在允许追问时回传问题清单，避免 L2「按默认执行」场景被误当成待澄清
+          questions: result.needsClarify
+            ? [...result.missing, ...result.partial].map((d) => `${d.label}：${d.question}`)
+            : [],
           classification: result.classification,
         }
       },
@@ -296,7 +313,7 @@ export function apply(ctx, config) {
     defineTool({
       name: 'spec_distill',
       description:
-        '把「原始需求 + 澄清答案 + 上下文」蒸馏成一段结构化、可直接执行的实现提示词。在需求已澄清完毕、即将开始写代码之前调用。产出的是确定性的结构化文本，不再经过模型二次加工，因此可复现、可比对。',
+        '把「原始需求 + 澄清答案 + 上下文」蒸馏成结构化实现提示词。需求澄清完毕、动手之前调用（fastTrack=true 的 L1 需求可跳过）。',
       parameters: {
         requirement: { type: 'string', required: true, description: '原始需求' },
         clarifications: {
@@ -380,7 +397,7 @@ export function apply(ctx, config) {
     defineTool({
       name: 'spec_retro',
       description:
-        '任务链真正收尾（改码完成、验证通过、用户无新要求）时把本次做法沉淀为模板，供未来同类需求自动召回复用。时机取舍：仅链尾调一次，链内小修合并进最终份；先过复用价值三问（下次还照做吗/结论跨项目成立吗/用户会反复提吗），任一为否则不调；纯问答/只读诊断/一次性任务绝不调用；用户明确说"沉淀/总结/记到模板库"则无条件调用。同名需求重复沉淀会覆盖更新，不新建。',
+        '任务链收尾（改码完成、验证通过、用户无新要求）时把本次做法沉淀为模板，供未来同类需求自动召回。先过复用价值三问（还照做吗/跨项目成立吗/会反复提吗）；纯问答、只读诊断、报错排查、环境修复、一次性任务不调用；用户明确要求时无条件调用。同名需求覆盖更新，不新建。',
       parameters: {
         name: { type: 'string', required: true, description: '模板名称，一句话概括这类需求，如「Spring Boot 新增分页查询接口」' },
         category: { type: 'string', description: '分类，如 feature/api、bugfix/refactor、frontend/component，默认 uncategorized' },
@@ -541,13 +558,21 @@ export function apply(ctx, config) {
     defineTool({
       name: 'spec_library',
       description:
-        '查看提示词模板库的状态与清单：数据目录、当前仓库哈希、模板总数、项目禁区，以及超过 90 天未使用的过期模板。当用户询问「模板库里有什么」「都沉淀了哪些模板」时调用。如需清理过期模板，仅在用户明确要求删除时才把 purge 设为 true（删除不可恢复）。',
+        '模板库管理。action=list：列模板清单/命中统计/项目禁区/过期模板（用户问「模板库里有什么」时用；purge=true 才物理删除）。action=info：查看存储模式、数据目录、跨盘状态与旧路径数据量。action=migrate：把旧 $DSH_HOME/spec-forge 复制到当前数据目录（move=true 删源）。',
       parameters: {
+        action: {
+          type: 'string',
+          description: "'list'（默认）模板清单 | 'info' 存储路径与模式 | 'migrate' 迁移旧数据",
+        },
         cwd: { type: 'string', description: '当前工作目录绝对路径' },
         purge: {
           type: 'boolean',
           description:
-            '是否物理删除过期模板（超过 90 天未使用）。默认 false 只统计不删除；必须用户明确表达「清理/删除过期模板」的意图才能传 true，删除不可恢复。',
+            'list 时是否物理删除过期模板（>90 天未命中）。默认 false 只统计；必须用户明确表达「清理/删除过期模板」才传 true，删除不可恢复。',
+        },
+        move: {
+          type: 'boolean',
+          description: 'migrate 时是否删除源文件，默认 false（复制保留源）',
         },
       },
       output: {
@@ -556,14 +581,33 @@ export function apply(ctx, config) {
           additionalProperties: true,
           properties: {
             report: { type: 'string', required: true },
-            total: { type: 'number', required: true },
+            total: { type: 'number' },
             removed: { type: 'number' },
+            action: { type: 'string' },
+            mode: { type: 'string' },
+            storagePath: { type: 'string' },
+            crossDrive: { type: 'boolean' },
+            legacy: { type: 'object', additionalProperties: true },
+            migration: { type: 'object', additionalProperties: true },
           },
         },
         render: (_args, value) => [{ type: 'text', text: value.report }],
       },
       async execute(args, exec) {
+        const action = args.action || 'list'
         const cwd = resolveCwd(args.cwd, exec)
+
+        // 0.4.0：原 spec_store 的能力并入本工具，避免多一个常驻工具定义
+        if (action === 'info' || action === 'migrate') {
+          return runStoreAction(action, {
+            cwd,
+            move: args.move === true,
+            home,
+            storageMode,
+            logger: ctx.logger,
+          })
+        }
+
         const scope = repoHash(cwd)
 
         let removed = 0
@@ -620,148 +664,7 @@ export function apply(ctx, config) {
           for (const r of info.profile.redlines) lines.push(`- ${r}`)
         }
 
-        return { report: lines.join('\n'), total: info.total, removed }
-      },
-    })
-  )
-
-  // ---------- 工具 6：存储路径与迁移 ----------
-
-  ctx.tools.register(
-    defineTool({
-      name: 'spec_store',
-      description:
-        '管理 spec-forge 模板库的存储位置。action=info 查看当前模式、数据目录、cwd、跨盘状态、旧 $DSH_HOME 数据量；action=migrate 把 $DSH_HOME/spec-forge/{global,projects/<cwd-hash>} 一次性复制到当前数据目录（同名文件跳过不覆盖，可选 move 删除源）。适用于工作区与 $DSH_HOME 不同盘导致 EPERM、或升级后想把旧数据搬到工作区的用户。',
-      parameters: {
-        action: {
-          type: 'string',
-          required: true,
-          description: "'info' 仅查询；'migrate' 触发迁移（只迁移当前 cwd 对应的项目层 + 全局层）",
-        },
-        cwd: {
-          type: 'string',
-          description: '当前工作目录绝对路径（migrate 时用于定位要迁移的项目层）',
-        },
-        move: {
-          type: 'boolean',
-          description: 'migrate 后是否删除源文件（默认 false = 复制保留源；删除前请确认目标已验证）',
-        },
-      },
-      output: {
-        schema: {
-          type: 'object',
-          additionalProperties: true,
-          properties: {
-            mode: { type: 'string', required: true },
-            storagePath: { type: 'string', required: true },
-            cwd: { type: 'string', required: true },
-            legacyPath: { type: 'string', required: true },
-            crossDrive: { type: 'boolean', required: true },
-            legacy: {
-              type: 'object',
-              additionalProperties: true,
-              properties: {
-                hasData: { type: 'boolean', required: true },
-                projectCount: { type: 'number', required: true },
-                globalCount: { type: 'number', required: true },
-                projectHash: { type: 'string', required: true },
-              },
-            },
-            migration: { type: 'object', additionalProperties: true },
-            report: { type: 'string', required: true },
-          },
-        },
-        render: (_args, value) => [{ type: 'text', text: value.report }],
-      },
-      async execute(args, exec) {
-        const cwd = resolveCwd(args.cwd, exec)
-        const legacyPath = dataRoot(resolveHome())
-        const crossDrive = isCrossDrive(cwd, legacyPath)
-        const projectHash = repoHash(cwd)
-
-        const result = {
-          mode: storageMode,
-          storagePath: home,
-          cwd,
-          legacyPath,
-          crossDrive,
-          legacy: { hasData: false, projectCount: 0, globalCount: 0, projectHash },
-        }
-
-        // info: 扫描旧路径数据量（migrate 之前也复用同一逻辑做预检）
-        try {
-          const srcProj = join(legacyPath, 'projects', projectHash)
-          const srcGlobal = join(legacyPath, 'global')
-          if (existsSync(srcProj)) result.legacy.projectCount = listTemplates(legacyPath, projectHash).length
-          if (existsSync(srcGlobal)) result.legacy.globalCount = listTemplates(legacyPath, 'global').length
-          result.legacy.hasData = result.legacy.projectCount + result.legacy.globalCount > 0
-        } catch (err) {
-          ctx.logger?.warn?.(`[spec-forge] 旧路径扫描失败: ${err.message}`)
-        }
-
-        let migration
-        if (args.action === 'migrate') {
-          const ops = []
-          const srcGlobal = join(legacyPath, 'global')
-          const dstGlobal = join(home, 'global')
-          const srcProj = join(legacyPath, 'projects', projectHash)
-          const dstProj = join(home, 'projects', projectHash)
-          if (existsSync(srcGlobal)) ops.push(copyTree(srcGlobal, dstGlobal, args.move === true))
-          if (existsSync(srcProj)) ops.push(copyTree(srcProj, dstProj, args.move === true))
-          migration = {
-            copied: ops.reduce((n, o) => n + o.copied, 0),
-            skipped: ops.reduce((n, o) => n + o.skipped, 0),
-            deleted: args.move === true ? ops.reduce((n, o) => n + o.copied, 0) : 0,
-            report: ops.map((o) => o.report).filter(Boolean).join('\n') || '(无文件复制)',
-          }
-          bumpWriteEpoch()
-        }
-
-        // 报告渲染
-        const lines = ['## 模板库存储', '']
-        lines.push(`- 模式：\`${storageMode}\``)
-        lines.push(`- 数据目录：\`${home}\``)
-        lines.push(`- 当前工作目录：\`${cwd}\``)
-        lines.push(`- 旧路径（$DSH_HOME/spec-forge）：\`${legacyPath}\``)
-        lines.push(`- 当前项目哈希：\`${projectHash}\``)
-        if (crossDrive) {
-          lines.push('- ⚠️ 检测到跨盘（cwd 与 $DSH_HOME 不在同一盘符）。workspace 模式已规避跨盘写。')
-        } else if (storageMode === 'home') {
-          lines.push('- cwd 与 $DSH_HOME 同盘，home 模式无跨盘风险。')
-        } else {
-          lines.push('- cwd 与 $DSH_HOME 同盘，workspace 模式无跨盘风险。')
-        }
-        lines.push('')
-        lines.push('### 旧路径数据概览')
-        lines.push('')
-        if (result.legacy.hasData) {
-          lines.push(`- 全局层模板：${result.legacy.globalCount}`)
-          lines.push(`- 当前项目层模板：${result.legacy.projectCount}`)
-        } else {
-          lines.push('- 旧路径无数据（global/ 或 projects/<hash> 不存在或为空）')
-        }
-        lines.push('')
-        if (migration) {
-          lines.push('### 迁移结果')
-          lines.push('')
-          lines.push(`- 复制：${migration.copied} 个文件`)
-          lines.push(`- 跳过（目标已存在）：${migration.skipped} 个`)
-          if (migration.deleted > 0) lines.push(`- 删除源文件：${migration.deleted} 个`)
-          if (migration.report) {
-            lines.push('')
-            lines.push('```')
-            lines.push(migration.report)
-            lines.push('```')
-          }
-        } else if (args.action === 'migrate') {
-          lines.push('未发现可迁移的旧数据，迁移执行了 0 次拷贝。')
-        } else {
-          lines.push('如需迁移，调用 `spec_store({ action: "migrate", cwd })`，先复制保留源，确认后再传 `move: true` 删源。')
-        }
-
-        result.migration = migration
-        result.report = lines.join('\n')
-        return result
+        return { report: lines.join('\n'), total: info.total, removed, action: 'list' }
       },
     })
   )
@@ -772,6 +675,82 @@ export function apply(ctx, config) {
 }
 
 // ---------- 辅助函数 ----------
+
+/**
+ * spec_library 的 info / migrate 分支（0.4.0 由原 spec_store 工具并入，减少一个常驻工具定义）。
+ */
+function runStoreAction(action, { cwd, move, home, storageMode, logger }) {
+  const legacyPath = dataRoot(resolveHome())
+  const crossDrive = isCrossDrive(cwd, legacyPath)
+  const projectHash = repoHash(cwd)
+
+  const legacy = { hasData: false, projectCount: 0, globalCount: 0, projectHash }
+  try {
+    const srcProj = join(legacyPath, 'projects', projectHash)
+    const srcGlobal = join(legacyPath, 'global')
+    if (existsSync(srcProj)) legacy.projectCount = listTemplates(legacyPath, projectHash).length
+    if (existsSync(srcGlobal)) legacy.globalCount = listTemplates(legacyPath, 'global').length
+    legacy.hasData = legacy.projectCount + legacy.globalCount > 0
+  } catch (err) {
+    logger?.warn?.(`[spec-forge] 旧路径扫描失败: ${err.message}`)
+  }
+
+  let migration
+  if (action === 'migrate') {
+    const ops = []
+    const srcGlobal = join(legacyPath, 'global')
+    const srcProj = join(legacyPath, 'projects', projectHash)
+    if (existsSync(srcGlobal)) ops.push(copyTree(srcGlobal, join(home, 'global'), move))
+    if (existsSync(srcProj)) ops.push(copyTree(srcProj, join(home, 'projects', projectHash), move))
+    migration = {
+      copied: ops.reduce((n, o) => n + o.copied, 0),
+      skipped: ops.reduce((n, o) => n + o.skipped, 0),
+      report: ops.map((o) => o.report).filter(Boolean).join('\n') || '(无文件复制)',
+    }
+    bumpWriteEpoch()
+  }
+
+  const lines = ['## 模板库存储', '']
+  lines.push(`- 模式：\`${storageMode}\``)
+  lines.push(`- 数据目录：\`${home}\``)
+  lines.push(`- 当前工作目录：\`${cwd}\``)
+  lines.push(`- 旧路径（$DSH_HOME/spec-forge）：\`${legacyPath}\``)
+  lines.push(`- 当前项目哈希：\`${projectHash}\``)
+  if (crossDrive) lines.push('- ⚠️ 检测到跨盘（cwd 与 $DSH_HOME 不同盘）。workspace 模式已规避跨盘写。')
+  lines.push('')
+  lines.push('### 旧路径数据概览')
+  lines.push('')
+  if (legacy.hasData) {
+    lines.push(`- 全局层模板：${legacy.globalCount}`)
+    lines.push(`- 当前项目层模板：${legacy.projectCount}`)
+  } else {
+    lines.push('- 旧路径无数据（global/ 或 projects/<hash> 不存在或为空）')
+  }
+  lines.push('')
+  if (migration) {
+    lines.push('### 迁移结果')
+    lines.push('')
+    lines.push(`- 复制：${migration.copied} 个文件；跳过（目标已存在）：${migration.skipped} 个`)
+    lines.push('')
+    lines.push('```')
+    lines.push(migration.report)
+    lines.push('```')
+  } else if (action === 'migrate') {
+    lines.push('未发现可迁移的旧数据，迁移执行了 0 次拷贝。')
+  } else {
+    lines.push('迁移用 `spec_library({ action: "migrate" })`：默认复制保留源，确认后再传 `move: true` 删源。')
+  }
+
+  return {
+    report: lines.join('\n'),
+    action,
+    mode: storageMode,
+    storagePath: home,
+    crossDrive,
+    legacy,
+    migration,
+  }
+}
 
 function resolveCwd(explicit, exec) {
   return explicit || exec?.agent?.session?.cwd || exec?.agent?.cwd || process.cwd()
