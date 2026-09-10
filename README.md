@@ -136,6 +136,8 @@ L1 还有一张"保守默认表"兜底：列表默认不展示新列、默认不
 
 跨盘写会触发 dsh 的 `workspace-write` 沙箱 EPERM（用户常反馈的"C 盘被拒绝"就是这个）。**新装用户无须配置**——0.3.3 起默认跟随工作区；老用户升级后如果还在用旧路径，调用 `spec_library({ action: 'info' })` 即可看到当前模式与路径，必要时调 `spec_library({ action: 'migrate' })` 把 `$DSH_HOME/spec-forge` 拷过来（默认复制保留源，验证后再传 `move: true` 删除源）。
 
+> **0.4.1 布局修正**：0.3.3/0.4.0 因把已是数据根的 `home` 又追加了一层，数据实际落在 `<root>/spec-forge/…`（`home` 模式下导致历史模板全部读不到、`migrate` 写到了插件不读的位置）。0.4.1 起 `<root>` 即数据根，与实际目录一致；启动时会自动把遗留的 `<root>/spec-forge/…` 一次性上移归位（新位置已有数据则不动）。若你在此期间用过 `workspace` 模式，无需手工处理。
+
 profile YAML 里手动覆盖：
 
 ```yaml
@@ -238,8 +240,14 @@ dsh web   # 必须重启，插件才会组合进插件树
 验证装没装上：
 
 ```bash
-dsh --profile web --dump-config | grep spec-forge
+# Bash / Git Bash（dsh 不在 PATH 时经 pnpm 调用）
+pnpm dsh --profile web --dump-config | grep spec-forge
+
+# PowerShell（没有 grep，用 Select-String）
+pnpm dsh --profile web --dump-config | Select-String spec-forge
 ```
+
+输出里应出现一段 `# == dsh-spec-forge` 及其配置块。`--dump-config` 只合成插件树、不启动服务，是排障第一招。
 
 ## 配置
 
@@ -264,7 +272,7 @@ dsh --profile web --dump-config | grep spec-forge
 ## 验证
 
 ```bash
-npm test          # 单元测试：158 个，覆盖指纹/匹配/会话提取/存储/渲染/分类器（含 fastTrack 与 DDL 防误伤）/沉淀门槛/读缓存/查询聚焦/路径解析/迁移
+npm test          # 单元测试：165 个，覆盖指纹（含序列化回归）/匹配/会话提取/存储（含布局回归）/渲染/分类器/沉淀门槛/读缓存/查询聚焦/路径解析/迁移
 npm run smoke     # 端到端冒烟：沉淀→召回→注入→体检→完成判定→幂等 整条链路
 npm run verify    # 加载验证：mock ctx 执行 apply()，确认工具都能注册、schema 合规
 npm run token-audit # 静态 token 预算审计：常驻/工具定义/SKILL/单次调用产出/真实库命中注入
@@ -274,7 +282,8 @@ npm run token-audit # 静态 token 预算审计：常驻/工具定义/SKILL/单�
 
 ```
 1. 沉淀：一次任务结束后写入模板          [PASS] 模板已落盘
-2. 召回：同类需求命中                    [PASS] 得分 0.499，命中次数已累加
+   指纹与布局自检                        [PASS] 指纹 8 项损坏 0 项 / 落盘无 [object Object] / 无多余 spec-forge 层级
+2. 召回：同类需求命中                    [PASS] 得分 0.499，lexical=0.635（确认靠词汇相似度而非仅元数据）
 3. 召回：异类需求不命中                  [PASS] 得分 0.136
 4. 注入：禁区/澄清清单/标准改法进上下文  [PASS]
 5. 体检：模糊需求被拦下要求澄清          [PASS] 缺失 要实现什么/哪些不能改/上下文

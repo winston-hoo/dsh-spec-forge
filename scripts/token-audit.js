@@ -124,6 +124,7 @@ out.push('')
 out.push('### 5. 命中历史模板时的注入成本（真实模板库）')
 out.push('')
 const home = process.argv.includes('--home') ? process.argv[process.argv.indexOf('--home') + 1] : join(homedir(), '.dsh')
+// listTemplates 的 home 参数自 0.4.1 起是「数据根」，所以这里先补一层 dataRoot
 const root = dataRoot(home)
 const projDir = join(root, 'projects')
 let totalReal = 0
@@ -132,7 +133,7 @@ if (existsSync(projDir)) {
   const scopes = readdirSync(projDir)
   out.push(`真实库位置：${root}（项目层 ${scopes.length} 个仓库）`)
   for (const scope of scopes) {
-    const templates = listTemplates(home, scope)
+    const templates = listTemplates(root, scope)
     if (templates.length === 0) continue
     totalReal += templates.length
     out.push(`- 仓库 ${scope}：${templates.length} 份模板`)

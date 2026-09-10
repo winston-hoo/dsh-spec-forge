@@ -14,6 +14,7 @@ import {
   copyTree,
   dataRoot,
   isCrossDrive,
+  liftLegacyNesting,
   listTemplates,
   parseFrontmatter,
   parseProfile,
@@ -141,7 +142,7 @@ test('writeTemplate + readTemplate：落盘后可原样读回', () => {
 test('writeTemplate：原子写不留下临时文件', () => {
   const id = templateId('x', 'abc123')
   writeTemplate(tmpHome, 'abc123', id, { name: 'x' }, 'body')
-  const dir = join(dataRoot(tmpHome), 'projects', 'abc123', 'templates')
+  const dir = join(tmpHome, 'projects', 'abc123', 'templates')
   const files = readdirSync(dir)
   assert.ok(files.every((f) => !f.endsWith('.tmp')), `不应残留临时文件：${files.join(',')}`)
 })
@@ -162,7 +163,7 @@ test('listTemplates：损坏的模板不影响其余加载', () => {
   writeTemplate(tmpHome, 'abc123', templateId('正常', 'abc123'), { name: '正常' }, 'body')
   const badId = templateId('损坏', 'abc123')
   writeTemplate(tmpHome, 'abc123', badId, { name: '损坏' }, 'body')
-  writeFileSync(join(dataRoot(tmpHome), 'projects', 'abc123', 'templates', `${badId}.md`), 'not a valid template')
+  writeFileSync(join(tmpHome, 'projects', 'abc123', 'templates', `${badId}.md`), 'not a valid template')
 
   const all = listTemplates(tmpHome, 'abc123')
   assert.equal(all.length, 2, '结构异常的文件也要能被列出，只是字段为空')
@@ -170,7 +171,7 @@ test('listTemplates：损坏的模板不影响其余加载', () => {
 
 test('listTemplates：跳过非法文件名', () => {
   writeTemplate(tmpHome, 'abc123', templateId('正常', 'abc123'), { name: '正常' }, 'body')
-  writeFileSync(join(dataRoot(tmpHome), 'projects', 'abc123', 'templates', 'evil.md'), 'x')
+  writeFileSync(join(tmpHome, 'projects', 'abc123', 'templates', 'evil.md'), 'x')
   assert.equal(listTemplates(tmpHome, 'abc123').length, 1)
 })
 
@@ -417,6 +418,96 @@ test('bumpWriteEpoch：返回值递增', () => {
   const a = bumpWriteEpoch()
   const b = bumpWriteEpoch()
   assert.ok(b > a, `bump 应单调递增: ${a} -> ${b}`)
+})
+
+// ---------- 0.4.1 回归：指纹序列化 ----------
+
+test('writeTemplate：对象形式的指纹会序列化成 token|weight（不再写成 [object Object]）', () => {
+  const id = templateId('指纹序列化', 'abc123')
+  writeTemplate(
+    tmpHome,
+    'abc123',
+    id,
+    { name: '指纹序列化', fingerprint: [{ token: 'index.vue', weight: 4 }, { token: '开关', weight: 3 }] },
+    'body',
+  )
+  const raw = readFileContent(templatePath(tmpHome, 'abc123', id))
+  assert.ok(!raw.includes('[object Object]'), '落盘内容不得出现 [object Object]')
+  assert.ok(raw.includes("'index.vue|4'") || raw.includes('index.vue|4'), '应写成 token|weight 形式')
+
+  const back = readTemplate(tmpHome, 'abc123', id)
+  assert.deepEqual(
+    back.fingerprint.map((f) => [f.token, f.weight]),
+    [['index.vue', 4], ['开关', 3]],
+    '读回后应还原为对象',
+  )
+})
+
+test('writeTemplate：字符串形式的指纹原样保留', () => {
+  const id = templateId('字符串指纹', 'abc123')
+  writeTemplate(tmpHome, 'abc123', id, { name: 'x', fingerprint: ['a|3', 'b|1'] }, 'body')
+  const back = readTemplate(tmpHome, 'abc123', id)
+  assert.deepEqual(back.fingerprint.map((f) => [f.token, f.weight]), [['a', 3], ['b', 1]])
+})
+
+test('writeTemplate：非法指纹项被丢弃而不是写坏', () => {
+  const id = templateId('脏指纹', 'abc123')
+  writeTemplate(tmpHome, 'abc123', id, { name: 'x', fingerprint: [null, 42, { weight: 2 }, { token: 'ok', weight: 1 }] }, 'body')
+  const back = readTemplate(tmpHome, 'abc123', id)
+  assert.deepEqual(back.fingerprint.map((f) => f.token), ['ok'])
+})
+
+test('recordHit：重写模板不会破坏既有指纹（0.4.0 曾把旧模板写成 [object Object]）', () => {
+  const id = templateId('命中的模板', 'abc123')
+  writeTemplate(tmpHome, 'abc123', id, { name: '命中的模板', fingerprint: [{ token: 'element-plus', weight: 3 }] }, 'body')
+
+  recordHit(tmpHome, 'abc123', id)
+  const raw = readFileContent(templatePath(tmpHome, 'abc123', id))
+  assert.ok(!raw.includes('[object Object]'), 'recordHit 后指纹仍必须可读')
+
+  const back = readTemplate(tmpHome, 'abc123', id)
+  assert.equal(back.hitCount, 1)
+  assert.deepEqual(back.fingerprint.map((f) => [f.token, f.weight]), [['element-plus', 3]])
+})
+
+// ---------- 0.4.1 回归：home 即数据根 ----------
+
+test('布局：home 就是数据根，模板直接落在 <home>/{global,projects}', () => {
+  writeTemplate(tmpHome, 'global', templateId('全局', 'global'), { name: '全局' }, 'body')
+  writeTemplate(tmpHome, 'abc123', templateId('项目', 'abc123'), { name: '项目' }, 'body')
+
+  assert.ok(existsSync(join(tmpHome, 'global', 'templates')), `应落在 <home>/global，实际不存在: ${tmpHome}`)
+  assert.ok(existsSync(join(tmpHome, 'projects', 'abc123', 'templates')), '应落在 <home>/projects/<hash>')
+  assert.ok(!existsSync(join(tmpHome, 'spec-forge')), '不得再出现多余的 spec-forge 层级')
+
+  assert.equal(listTemplates(tmpHome, 'abc123').length, 2)
+  assert.equal(listTemplates(tmpHome, null).length, 1)
+})
+
+test('layoutNotice：0.3.3/0.4.0 的嵌套布局会被一次性归位', () => {
+  // 造出旧布局：<home>/spec-forge/{global,projects}
+  const nested = join(tmpHome, 'spec-forge')
+  mkdirSync(join(nested, 'projects', 'abc123', 'templates'), { recursive: true })
+  writeFileSync(
+    join(nested, 'projects', 'abc123', 'templates', 'tpl-aaaaaaaaaa.md'),
+    stringifyFrontmatter({ id: 'tpl-aaaaaaaaaa', name: '旧布局模板', scope: 'abc123' }, 'body'),
+  )
+
+  const notice = liftLegacyNesting(tmpHome, { warn() {} })
+  assert.ok(typeof notice === 'string' && notice.length > 0, '应返回归位说明')
+  assert.ok(existsSync(join(tmpHome, 'projects', 'abc123', 'templates', 'tpl-aaaaaaaaaa.md')), '文件应上移一层')
+  assert.equal(listTemplates(tmpHome, 'abc123').length, 1, '归位后应能被检索到')
+})
+
+test('layoutNotice：新位置已有数据时不动旧嵌套目录', () => {
+  writeTemplate(tmpHome, 'abc123', templateId('新数据', 'abc123'), { name: '新数据' }, 'body')
+  const nested = join(tmpHome, 'spec-forge', 'projects', 'abc123', 'templates')
+  mkdirSync(nested, { recursive: true })
+  writeFileSync(join(nested, 'tpl-bbbbbbbbbb.md'), 'x')
+
+  const notice = liftLegacyNesting(tmpHome, { warn() {} })
+  assert.equal(notice, null, '已有新数据时不应归位，避免覆盖')
+  assert.ok(existsSync(join(nested, 'tpl-bbbbbbbbbb.md')))
 })
 
 function readFileContent(file) {
