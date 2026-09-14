@@ -38,15 +38,54 @@ test('spec_recall：原子小改 => fastTrack + nextStep=implement，并明确�
   try {
     const recall = t.byName('spec_recall')
     assert.ok(recall, '未注册 spec_recall')
-    return recall.execute({ requirement: '登录页加一个按钮' }).then((res) => {
+    return recall.execute({ requirement: '改一下登录页的文案' }).then((res) => {
       assert.equal(res.level, 1)
       assert.equal(res.fastTrack, true)
       assert.equal(res.nextStep, 'implement')
+      assert.deepEqual(res.contentGap, [])
       assert.ok(res.context.includes('不要调用 `spec_triage`'), 'fastTrack 正文必须点明不要调用 spec_triage')
       assert.ok(res.context.includes('不要调用 `spec_distill`'), 'fastTrack 正文必须点明不要调用 spec_distill')
       // 未命中分支不得再无条件要求沉淀（旧文案「会话结束时请调用 spec_retro」是过度沉淀的诱因）
       assert.ok(!res.context.includes('会话结束时请调用'), '不应出现无条件沉淀指令')
       assert.ok(res.context.includes('原子小改、一次性任务跳过沉淀即可'), '未命中分支应与复用价值三问口径一致')
+    })
+  } finally {
+    t.cleanup()
+  }
+})
+
+test('spec_recall：容器型缺内容 => nextStep=confirm + contentGap 非空 + 明文要求先问（0.4.6）', () => {
+  const t = loadTools()
+  try {
+    const recall = t.byName('spec_recall')
+    // 真实的触发需求：带目标文件路径前缀。它 tooShort=false、hasAnchor=true，
+    // L2 的 unactionable 安全阀不会响，必须靠 contentGap 独立拦截。
+    const req = '@example-admin/src/views/login/index.vue 登录页加个按钮'
+    return recall.execute({ requirement: req }).then((res) => {
+      assert.equal(res.fastTrack, false)
+      assert.equal(res.nextStep, 'confirm')
+      assert.deepEqual(res.contentGap, ['按钮的文案与用途'], '必须告诉模型缺的是什么')
+      assert.ok(res.context.includes('先确认再动手'), '正文必须给出 confirm 的执行路径')
+      assert.ok(res.context.includes('按钮的文案与用途'), '正文必须把缺口写出来')
+      assert.ok(res.context.includes('ask_user_question'), 'confirm 必须要求先问')
+      assert.ok(
+        !res.context.includes('禁止追问；**不要调用 `spec_triage`'),
+        'confirm 不得复用 fastTrack 的"禁止追问"指令',
+      )
+    })
+  } finally {
+    t.cleanup()
+  }
+})
+
+test('spec_recall：容器型已给内容 => 仍走 implement（闸门不得误伤）', () => {
+  const t = loadTools()
+  try {
+    const recall = t.byName('spec_recall')
+    return recall.execute({ requirement: '登录页加个忘记密码按钮，点击跳转注册页' }).then((res) => {
+      assert.equal(res.fastTrack, true, `实际 signals: ${JSON.stringify(res.contentGap)}`)
+      assert.equal(res.nextStep, 'implement')
+      assert.deepEqual(res.contentGap, [])
     })
   } finally {
     t.cleanup()
@@ -137,11 +176,34 @@ test('spec_triage：fastTrack 需求被调用时仍返回 fast-track 模式（�
   const t = loadTools()
   try {
     const triage = t.byName('spec_triage')
-    return triage.execute({ requirement: '加个按钮' }).then((res) => {
+    // 用"取值型"小改：容器型缺内容的需求 0.4.6 起不再判 fastTrack（见下一条）
+    return triage.execute({ requirement: '改一下登录页的文案' }).then((res) => {
       assert.equal(res.mode, 'fast-track')
       assert.equal(res.level, 1)
       assert.deepEqual(res.questions, [], 'fastTrack 不得回传追问清单')
       assert.ok(res.report.includes('直接执行清单'))
+    })
+  } finally {
+    t.cleanup()
+  }
+})
+
+test('spec_triage：内容缺失的需求必须给"缺内容"说法，不得沿用"没有任何锚点"（0.4.6）', () => {
+  const t = loadTools()
+  try {
+    const triage = t.byName('spec_triage')
+    // 带路径前缀 → 有 inferredFile 锚点。旧文案会写"这条需求没有任何可动手的锚点"，
+    // 与事实自相矛盾（正是 0.4.6 修掉的那类"文档自相矛盾"）。措辞必须分cause。
+    const req = '@example-admin/src/views/login/index.vue 登录页加个按钮'
+    return triage.execute({ requirement: req }).then((res) => {
+      assert.equal(res.needsClarify, true, 'contentGap 非空必须要求澄清')
+      assert.equal(res.level, 2)
+      assert.ok(res.report.includes('需求缺内容'), res.report.slice(0, 200))
+      assert.ok(res.report.includes('按钮的文案与用途'), '报告要点明缺的内容')
+      assert.ok(
+        !res.report.includes('没有任何可动手的锚点'),
+        '不得再写"没有任何锚点"—— 这条需求是有锚点的（识别出了目标文件）',
+      )
     })
   } finally {
     t.cleanup()
@@ -176,10 +238,15 @@ test('常驻提示段：关键约束不得在精简中丢失（回归护栏）',
     const text = routing.text
     const required = [
       ['nextStep', '按 nextStep 路由（0.4.3 的核心修复）'],
-      ['`spec_triage` 或 `spec_distill`', 'fastTrack 必须明文禁止多余调用'],
-      ['仅 L3 与 L2 安全阀可 `ask_user_question`', '提问权限的排他性（勿弱化）'],
-      ['一次问完', '不得挤牙膏式反复追问'],
+      ['`spec_triage`/`spec_distill`', 'fastTrack 必须明文禁止多余调用'],
+      ['contentGap', 'confirm 分支必须点名缺什么（0.4.6）'],
+      ['confirm', '必须有第三态执行路径，否则内容缺失的需求无处可去（0.4.6）'],
+      ['问清', 'confirm 分支必须写明"先问清再实现"（0.4.6）'],
+      ['ask_user_question', '提问权限要具名'],
+      ['L2 安全阀', '提问权限必须仍写成"封闭列举"，不能放开成随便问（0.4.6 把 confirm 加进列举）'],
+      ['提问前禁用任何文件类工具', '提问前禁用的工具要说明（勿弱化）'],
       ['read/grep/glob/bash/ls', '提问前禁用的工具要具名'],
+      ['一次问完', '不得挤牙膏式反复追问'],
       ['直接做', '跳过词'],
       ['别问', '跳过词'],
       ['不要问', '跳过词'],

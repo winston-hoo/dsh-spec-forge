@@ -104,13 +104,16 @@ export function apply(ctx, config) {
       text: [
         '## 需求锻造（spec-forge）',
         '编程需求：先 `spec_recall`（传原文），然后**严格按它返回的 `nextStep` 执行**，不自作主张加步骤。',
-        '- `nextStep=implement`（`fastTrack=true`：L1 原子小改 / 单字段 CRUD / 带参考物的自包含新建 / 用户要求不追问）：',
-        '  禁止追问；**不要再调 `spec_triage` 或 `spec_distill`**（召回正文已替代其产出）；直接实现，',
-        '  疑虑写 `// TODO: [待确认] <内容>`，在最终报告里点出。',
-        '- `nextStep=triage`（`fastTrack=false`）：再调一次 `spec_triage`，按它给的报告动手 ——',
+        '- `implement`（`fastTrack=true`）：禁止追问；**不要再调 `spec_triage`/`spec_distill`**（召回正文已替代其产出）；',
+        '  直接实现，疑虑写 `// TODO: [待确认] <内容>`，在最终报告里点出。',
+        '  用户消息含"直接做/速做/不用问/别问/不要问/极速模式" → 无条件 implement。',
+        '- `confirm`（`contentGap` 非空：需求只给了"加个按钮/加个路由"这类容器，没说是什么）：',
+        '  **先用一次 `ask_user_question` 把 `contentGap` 里缺的内容问清**（每题给 2-3 个候选 + 一个推荐默认），',
+        '  拿到回答后直接实现；不要再调 `spec_triage`/`spec_distill`。',
+        '- `triage`（`fastTrack=false`）：再调一次 `spec_triage`，按它给的报告动手 ——',
         '  L2 按报告默认值执行、禁止追问；L3 完整先问后查。',
-        '- 仅 L3 与 L2 安全阀可 `ask_user_question`；提问前禁用任何文件类工具（read/grep/glob/bash/ls），一次问完。',
-        '用户消息含"直接做/速做/不用问/别问/不要问/极速模式" → 无条件 fastTrack。',
+        '- 可以 `ask_user_question` 的只有三种：`nextStep=confirm`、L3、L2 安全阀；',
+        '  提问前禁用任何文件类工具（read/grep/glob/bash/ls），一次问完。',
         '大文件纪律：>20K 字符的文件禁止整文件 read，先 grep 定位再分段读；确需整读先落要点摘要。',
         '收尾过复用价值三问（还会照做/跨项目成立/会反复提）后 `spec_retro` 一次；纯问答、只读诊断、报错排查、',
         '环境修复、L1 原子小改（改文案/调样式/加按钮/加列）不沉淀；用户明确要求时无条件沉淀。',
@@ -149,7 +152,7 @@ export function apply(ctx, config) {
     defineTool({
       name: 'spec_recall',
       description:
-        '检索历史提示词模板库，返回命中模板（澄清清单/标准改法/验收标准）、本项目禁区，以及复杂度分级（level、fastTrack 与 nextStep）。用户提出编程需求时在任何代码改动之前调用，是硬性前置步骤。',
+        '检索历史提示词模板库，返回命中模板（澄清清单/标准改法/验收标准）、本项目禁区，以及复杂度分级（level、fastTrack、contentGap 与 nextStep）。nextStep=confirm 时表示需求缺内容（如只说"加个按钮"没说是什么），必须先问清再动手。用户提出编程需求时在任何代码改动之前调用，是硬性前置步骤。',
       parameters: {
         requirement: {
           type: 'string',
@@ -173,10 +176,15 @@ export function apply(ctx, config) {
             notice: { type: 'string' },
             level: { type: 'number', description: '复杂度等级 1|2|3' },
             fastTrack: { type: 'boolean', description: 'true 时直接实现，禁止调用 spec_triage 与 spec_distill' },
+            contentGap: {
+              type: 'array',
+              description: '需求缺失的内容（如“按钮的文案与用途”）。非空时禁止直接实现，必须先问清',
+            },
             nextStep: {
               type: 'string',
               required: true,
-              description: "下一步动作指令：'implement'（fastTrack，直接改代码）| 'triage'（先调 spec_triage）",
+              description:
+                "下一步动作指令：'implement'（fastTrack，直接改代码）| 'confirm'（contentGap 非空：先用一次 ask_user_question 问清再动手，不要调 spec_triage）| 'triage'（先调 spec_triage）",
             },
           },
         },
@@ -217,7 +225,11 @@ export function apply(ctx, config) {
         //   「澄清清单 + 体检流程行」（那两块与"禁止追问/不要调 triage"冲突，且占返回量七成）。
         const level = classification.level
         const fastTrack = classification.fastTrack === true
-        const nextStep = fastTrack ? 'implement' : 'triage'
+        // 0.4.6：新增第三态 'confirm' —— 容器型原子改动但没说清"加的是什么"
+        //   （如「登录页加个按钮」）。此时既不该直接实现（要替用户做产品决策），
+        //   也不必走完整体检（就缺一个信息）→ 直接要求问一次再动手。
+        const contentGap = Array.isArray(classification.contentGap) ? classification.contentGap : []
+        const nextStep = fastTrack ? 'implement' : contentGap.length > 0 ? 'confirm' : 'triage'
 
         const injection = renderInjection({
           results,
@@ -231,11 +243,15 @@ export function apply(ctx, config) {
           ? '> **执行路径：1 步直达。** fastTrack=true（L1 原子改动 / 自包含新建 / 用户已要求不追问）。\n' +
             '> **下一步就是实现**：禁止追问；**不要调用 `spec_triage`，也不要调用 `spec_distill`**（本条已替代它们的产出）。\n' +
             '> 直接改代码，疑虑写 `// TODO: [待确认] <内容>`，最终报告里点出。\n\n'
-          : `> **执行路径：先体检。** fastTrack=false（level=L${level}）。\n` +
-            '> **下一步调用 `spec_triage`**（传同一份原文），按它给出的清单再动手：' +
-            (level === 3
-              ? 'L3 完整先问后查（可 ask_user_question，提问前禁用文件类工具）。\n\n'
-              : 'L2 按报告默认值执行、禁止追问（仅"过短且零锚点"会让你一次问清再动手）。\n\n')
+          : nextStep === 'confirm'
+            ? `> **执行路径：先确认再动手。** fastTrack=false（level=L${level}，需求缺内容：${contentGap.join('；')}）。\n` +
+              '> **下一步用一次 `ask_user_question` 把上面缺的内容问清**（每题给 2-3 个候选 + 一个推荐默认），\n' +
+              '> **不要调用 `spec_triage` / `spec_distill`**；拿到回答后直接实现。提问前禁用文件类工具。\n\n'
+            : `> **执行路径：先体检。** fastTrack=false（level=L${level}）。\n` +
+              '> **下一步调用 `spec_triage`**（传同一份原文），按它给出的清单再动手：' +
+              (level === 3
+                ? 'L3 完整先问后查（可 ask_user_question，提问前禁用文件类工具）。\n\n'
+                : 'L2 按报告默认值执行、禁止追问（仅"过短且零锚点"会让你一次问清再动手）。\n\n')
         const context = levelLine + injection
 
         const notice = buildRecallNotice(exec, state, config)
@@ -254,6 +270,7 @@ export function apply(ctx, config) {
           notice,
           level,
           fastTrack,
+          contentGap,
           nextStep,
         }
       },
@@ -266,7 +283,7 @@ export function apply(ctx, config) {
     defineTool({
       name: 'spec_triage',
       description:
-        '四维需求体检（要实现什么/怎么改/哪些不能改/上下文）并标注 Level，返回可直接执行的报告：L1 出执行清单（禁追问）；L2 出默认值清单（按默认执行、禁追问，仅"过短且零锚点"时转为一次性追问）；L3 出完整追问清单。**仅当 spec_recall 返回 fastTrack=false 时调用；fastTrack=true 时不要调用本工具。**',
+        '四维需求体检（要实现什么/怎么改/哪些不能改/上下文）并标注 Level，返回可直接执行的报告：L1 出执行清单（禁追问）；L2 出默认值清单（按默认执行、禁追问，仅"过短且零锚点"或"缺内容"时转为一次性追问）；L3 出完整追问清单。**仅当 spec_recall 返回 nextStep=triage 时调用**；nextStep=implement（可直接动手）或 confirm（先用 ask_user_question 问清 contentGap）时都不要调用本工具。',
       parameters: {
         requirement: {
           type: 'string',
