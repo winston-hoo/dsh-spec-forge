@@ -55,13 +55,21 @@ if (sysMatch) {
   sysText = lines.join('\n')
 }
 const sysToks = estTokens(sysText)
+// SYS_BUDGET 是**参考线，不是硬限制**（0.4.3 明确）：
+// dsh 的 renderPrompt 只把两侧 sections 按 order 排序后 join('\n\n')，
+// 没有任何截断或长度上限（依据 packages/core/system-prompt/src/index.ts 的 renderPrompt）。
+// 因此超线只意味着"每轮多花几个 token"，**不会导致指令被裁剪或丢失**。
+// 教训：曾把 447 误读成"超预算"而做了一轮压缩，结果丢掉了「报错排查」等真实指令——
+// 不要为了压到线内牺牲内容；内容的完整性优先于这条线。
 const SYS_BUDGET = 450
 out.push(
   row(
     '① 常驻系统提示词段 spec-forge:routing',
     sysText.length,
     sysToks,
-    sysToks <= SYS_BUDGET ? `每轮请求都带（预算 ≤${SYS_BUDGET}）` : `⚠️ 超出预算 ${SYS_BUDGET}`,
+    sysToks <= SYS_BUDGET
+      ? `每轮请求都带（参考线 ≤${SYS_BUDGET}，非硬限制）`
+      : `每轮请求都带（超参考线约 ${sysToks - SYS_BUDGET} token；无截断风险，按内容需要取舍）`,
   ),
 )
 

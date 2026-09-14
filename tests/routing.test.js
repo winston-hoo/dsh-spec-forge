@@ -147,3 +147,58 @@ test('spec_triage：fastTrack 需求被调用时仍返回 fast-track 模式（�
     t.cleanup()
   }
 })
+
+// ---------- 常驻提示段的"防静默丢失"护栏（0.4.3） ----------
+//
+// 背景：为把常驻提示段压到审计脚本的参考线以内，曾做了一轮"为压缩而压缩"，
+// 结果删掉了「报错排查」这条**只存在于本段**的约定（SKILL.md 里也没有），
+// 并弱化了 ask_user_question 的排他性约束。而 dsh 的 renderPrompt 其实只做
+// sections 排序 + join('\n\n')，**没有任何截断或长度上限**——超线只是多花 token。
+// 因此这里把必须常驻的约束逐条钉死：允许改写措辞，但不允许悄悄删掉。
+
+test('常驻提示段：关键约束不得在精简中丢失（回归护栏）', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'spec-forge-routing-'))
+  const sections = []
+  try {
+    const ctx = {
+      tools: { register: () => {} },
+      get: (name) => (name === 'systemPrompt' ? { section: (s) => sections.push(s) } : null),
+      on: () => {},
+      logger: { info: () => {}, warn: () => {} },
+    }
+    apply(ctx, schema({ storageHome: dir }))
+
+    const routing = sections.find((s) => s.name === 'spec-forge:routing')
+    assert.ok(routing, '未注册 spec-forge:routing 提示段')
+    assert.ok(Number.isFinite(routing.order), 'order 必须是有限数（dsh 会直接抛错）')
+    assert.equal(routing.order, 150)
+
+    const text = routing.text
+    const required = [
+      ['nextStep', '按 nextStep 路由（0.4.3 的核心修复）'],
+      ['`spec_triage` 或 `spec_distill`', 'fastTrack 必须明文禁止多余调用'],
+      ['仅 L3 与 L2 安全阀可 `ask_user_question`', '提问权限的排他性（勿弱化）'],
+      ['一次问完', '不得挤牙膏式反复追问'],
+      ['read/grep/glob/bash/ls', '提问前禁用的工具要具名'],
+      ['直接做', '跳过词'],
+      ['别问', '跳过词'],
+      ['不要问', '跳过词'],
+      ['极速模式', '跳过词'],
+      ['报错排查', '不沉淀清单里的报错排查（SKILL.md 无此条，删了就真没了）'],
+      ['只读诊断', '不沉淀清单'],
+      ['环境修复', '不沉淀清单'],
+      ['复用价值三问', '沉淀闸门'],
+      ['>20K', '大文件纪律：严禁整读大文件'],
+      ['先 grep 定位再分段读', '大文件纪律的具体做法'],
+      ['禁区', '禁区是硬约束'],
+    ]
+    for (const [needle, why] of required) {
+      assert.ok(text.includes(needle), `常驻提示段丢失了「${needle}」（${why}）`)
+    }
+
+    // 反向断言：常驻段不该长到失去"常驻"的意义（这里只提示量级，不做硬卡）
+    assert.ok(text.length < 1400, `常驻段过长了（${text.length} 字符），每轮都要付这份 token`)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
