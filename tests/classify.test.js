@@ -255,3 +255,71 @@ test('classifyComplexity：DDL 前后视断言不影响"参考列表页做表格
   assert.equal(r.level, 1)
   assert.equal(r.fastTrack, true)
 })
+
+// ---------- 原子小改快速通道（0.4.3） ----------
+//
+// 背景：0.4.0~0.4.2 只给了「单字段 CRUD」和「自包含新建」两条 L1 通路，
+// 「加按钮 / 改文案 / 调样式 / 加一列 / 加路由 / 改默认值 / 字段改名」这类
+// 同样一轮能做完的小需求全部落 L2，每次白跑一趟 spec_triage。
+
+test('classifyComplexity：原子小改（文案/样式/按钮/列/路由/常量/改名）判为 L1 fastTrack', () => {
+  const cases = [
+    ['加个按钮', 'button'],
+    ['登录页加一个按钮', 'button'],
+    ['改一下登录页的文案', 'copy'],
+    ['把标题换成「停车物料」', 'copy'],
+    ['调一下间距', 'style'],
+    ['改一下颜色', 'style'],
+    ['样式错位', 'style'],
+    ['列表加一列显示手机号', 'column'],
+    ['表格里加个搜索项', 'column'],
+    ['新增一个路由指向物料页', 'route'],
+    ['把超时时间改成 30s', 'constant'],
+    ['把默认值改成草稿', 'constant'],
+    ['isMainAdmin 字段改名为 isPrimaryAdmin', 'rename'],
+    ['这段代码小改一下', 'tiny'],
+  ]
+  for (const [text, family] of cases) {
+    const r = classifyComplexity(text)
+    assert.equal(r.level, 1, `应判 L1：${text}`)
+    assert.equal(r.fastTrack, true, `应 fastTrack：${text}`)
+    assert.ok(r.signals.includes('L1:atomic-edit'), `应含 L1:atomic-edit：${text}`)
+    assert.ok(r.signals.includes(`L1:atomic-edit:${family}`), `族应为 ${family}：${text}（实际 ${r.signals.join(',')}）`)
+  }
+})
+
+test('classifyComplexity：多任务连接词阻断原子通道（避免把复合需求当小改）', () => {
+  const r = classifyComplexity('加个按钮，同时把列表也重构一下')
+  assert.equal(r.fastTrack, false)
+  assert.notEqual(r.level, 1)
+})
+
+test('classifyComplexity：大范围限定词阻断原子通道（影响面不可控）', () => {
+  for (const text of ['统一所有按钮的文案', '整体优化一下样式', '批量修改搜索项']) {
+    const r = classifyComplexity(text)
+    assert.equal(r.fastTrack, false, `不应 fastTrack：${text}`)
+    assert.notEqual(r.level, 1, `不应判 L1：${text}`)
+  }
+})
+
+test('classifyComplexity：长需求不因含小改动词而误升（长度闸门）', () => {
+  const text =
+    '先看一下现在这个页面的实现，然后把按钮的文案改一下，另外确认下表格里那一列的数据来源是否正确，最后再跑一遍测试确认没有回归问题'
+  const r = classifyComplexity(text)
+  assert.equal(r.fastTrack, false, '超长复合需求不应走原子通道')
+})
+
+test('classifyComplexity：原子通道不吞掉原有 L2/L3 判定', () => {
+  assert.equal(classifyComplexity('在 UserController 新增一个分页查询接口').level, 2)
+  assert.equal(classifyComplexity('帮我改一下那个查询').level, 2)
+  assert.equal(classifyComplexity('建一张 user_logs 表').level, 3)
+  assert.equal(classifyComplexity('把用户模块重构拆分为独立服务').level, 3)
+  assert.equal(classifyComplexity('新建一个页面').level, 2)
+  assert.equal(classifyComplexity('新建一个数据表格页面').level, 2)
+})
+
+test('classifyComplexity：反例——改列表页 / 加列表不应被当成"改一列 / 加一列"', () => {
+  // 中文复合词误伤是历史高频坑（0.4.0 的 DDL 误判同源），"列" 必须排除 列表/列页/列格
+  const r = classifyComplexity('改列表页的查询条件')
+  assert.ok(!r.signals.includes('L1:atomic-edit:column'), `"列" 不应匹配"列表"：${r.signals.join(',')}`)
+})
