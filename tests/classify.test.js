@@ -261,19 +261,20 @@ test('classifyComplexity：DDL 前后视断言不影响"参考列表页做表格
 // 背景：0.4.0~0.4.2 只给了「单字段 CRUD」和「自包含新建」两条 L1 通路，
 // 「加按钮 / 改文案 / 调样式 / 加一列 / 加路由 / 改默认值 / 字段改名」这类
 // 同样一轮能做完的小需求全部落 L2，每次白跑一趟 spec_triage。
+//
+// 0.4.6 修正：上面那句话里混了两类需求，必须分开 ——
+//   取值型（改文案/调样式/改默认值）：缺的是"改成什么"，可逆可见 → 仍 L1 fastTrack
+//   容器型（加按钮/加路由/加列/加菜单项）：缺的是"这个新增物是什么/干什么"，
+//     那是产品决策，替用户挑一个就是猜 → 必须有内容，否则降 L2 并要求问一次
 
-test('classifyComplexity：原子小改（文案/样式/按钮/列/路由/常量/改名）判为 L1 fastTrack', () => {
+test('classifyComplexity：原子小改（文案/样式/常量/改名）判为 L1 fastTrack', () => {
   const cases = [
-    ['加个按钮', 'button'],
-    ['登录页加一个按钮', 'button'],
     ['改一下登录页的文案', 'copy'],
     ['把标题换成「停车物料」', 'copy'],
     ['调一下间距', 'style'],
     ['改一下颜色', 'style'],
     ['样式错位', 'style'],
-    ['列表加一列显示手机号', 'column'],
-    ['表格里加个搜索项', 'column'],
-    ['新增一个路由指向物料页', 'route'],
+    ['改按钮样式', 'style'],
     ['把超时时间改成 30s', 'constant'],
     ['把默认值改成草稿', 'constant'],
     ['isMainAdmin 字段改名为 isPrimaryAdmin', 'rename'],
@@ -283,15 +284,84 @@ test('classifyComplexity：原子小改（文案/样式/按钮/列/路由/常量
     const r = classifyComplexity(text)
     assert.equal(r.level, 1, `应判 L1：${text}`)
     assert.equal(r.fastTrack, true, `应 fastTrack：${text}`)
+    assert.deepEqual(r.contentGap, [], `取值型不该报内容缺失：${text}`)
     assert.ok(r.signals.includes('L1:atomic-edit'), `应含 L1:atomic-edit：${text}`)
     assert.ok(r.signals.includes(`L1:atomic-edit:${family}`), `族应为 ${family}：${text}（实际 ${r.signals.join(',')}）`)
   }
+})
+
+test('classifyComplexity：容器型原子改动已给出"是什么" → 仍 L1 fastTrack', () => {
+  const cases = [
+    ['加个导出按钮', 'button', '用途动词紧邻容器'],
+    ['列表加个新增按钮', 'button', '用途动词紧邻容器'],
+    ['登录页加个忘记密码按钮', 'button', '修饰语给出标签'],
+    ['加个按钮，点击跳转注册页', 'button', '点击行为已给'],
+    ['列表加一列显示手机号', 'column', '列内容已给'],
+    ['加一列状态', 'column', '列名已给'],
+    ['加个报表路由', 'route', '名称已给'],
+    ['新增一个路由指向物料页', 'route', '目标已给'],
+  ]
+  for (const [text, family, why] of cases) {
+    const r = classifyComplexity(text)
+    assert.equal(r.level, 1, `应判 L1（${why}）：${text}`)
+    assert.equal(r.fastTrack, true, `应 fastTrack（${why}）：${text}`)
+    assert.deepEqual(r.contentGap, [], `不该报内容缺失（${why}）：${text}`)
+    assert.ok(
+      r.signals.includes(`L1:atomic-edit:${family}`),
+      `族应为 ${family}：${text}（实际 ${r.signals.join(',')}）`,
+    )
+  }
+})
+
+test('classifyComplexity：容器型但没说清"是什么" → 降 L2 并报 contentGap（0.4.6 闸门④）', () => {
+  const cases = [
+    ['加个按钮', 'button', ['按钮的文案与用途']],
+    ['登录页加一个按钮', 'button', ['按钮的文案与用途']],
+    // ⚠️ 这条是真实的触发需求：带目标文件路径前缀。它 tooShort=false、hasAnchor=true，
+    //    所以 L2 的 unactionable 安全阀根本不会响 —— 必须靠 contentGap 独立拦截。
+    ['@youting-admin/src/views/login/index.vue 登录页加个按钮', 'button', ['按钮的文案与用途']],
+    ['表格里加个搜索项', 'column', ['新增列对应的字段']],
+    ['加一列', 'column', ['新增列对应的字段']],
+    ['加个路由', 'route', ['路由/菜单项的路径与目标页面']],
+    ['加个菜单项', 'route', ['路由/菜单项的路径与目标页面']],
+  ]
+  for (const [text, family, gap] of cases) {
+    const r = classifyComplexity(text)
+    assert.equal(r.level, 2, `应降 L2：${text}`)
+    assert.equal(r.fastTrack, false, `不应 fastTrack：${text}`)
+    assert.deepEqual(r.contentGap, gap, `contentGap 不符：${text}`)
+    assert.ok(r.signals.includes('L2:content-missing'), `应含 L2:content-missing：${text}`)
+    assert.ok(
+      r.signals.includes(`L2:content-missing:${family}`),
+      `族应为 ${family}：${text}（实际 ${r.signals.join(',')}）`,
+    )
+  }
+})
+
+test('classifyComplexity：带路径前缀不得被当成"内容已给"（0.4.6 实测踩过的坑）', () => {
+  // 需求里的路径是"改哪个文件"，不是"按钮做什么"。若把路径当内容信号，
+  // 真实那条 `@…/login/index.vue 登录页加个按钮` 就会被误放行。
+  const withPath = classifyComplexity('@youting-admin/src/views/login/index.vue 登录页加个按钮')
+  const withoutPath = classifyComplexity('登录页加个按钮')
+  assert.deepEqual(withPath.contentGap, withoutPath.contentGap)
+  assert.equal(withPath.fastTrack, false)
+  assert.equal(withPath.inferredFile, 'youting-admin/src/views/login/index.vue', '路径仍应被识别为目标文件')
+})
+
+test('classifyComplexity：用户显式弃权时不拦（skip-trigger 优先于内容闸门）', () => {
+  const r = classifyComplexity('直接做，加个按钮')
+  assert.equal(r.level, 1)
+  assert.equal(r.fastTrack, true)
+  assert.deepEqual(r.contentGap, [])
+  assert.equal(r.skipTrigger, '直接做')
 })
 
 test('classifyComplexity：多任务连接词阻断原子通道（避免把复合需求当小改）', () => {
   const r = classifyComplexity('加个按钮，同时把列表也重构一下')
   assert.equal(r.fastTrack, false)
   assert.notEqual(r.level, 1)
+  // 多任务需求走 L2→spec_triage 的常规路径，不该被降成"问一句"（会绕过体检）
+  assert.deepEqual(r.contentGap, [])
 })
 
 test('classifyComplexity：大范围限定词阻断原子通道（影响面不可控）', () => {
