@@ -276,3 +276,75 @@ test('端到端：沉淀出的模板能被再次解析回结构化段落', () =>
   assert.ok(sectionOf(body, SECTIONS.redlines).includes('Result.java'))
   assert.ok(sectionOf(body, SECTIONS.acceptance).includes('mvn test 通过'))
 })
+
+// ---------- 0.4.5：fastTrack 时省略与指令冲突的内容 ----------
+
+function tplWithFlow() {
+  return {
+    id: 'tpl-f1a2b3c4d5',
+    name: '把设计稿 HTML 落成 admin 页面',
+    body: [
+      '## 需求澄清清单',
+      '',
+      '- 页面形态：纯展示还是可交互？',
+      '- 路由挂载在哪个菜单下？',
+      '',
+      '## 标准改法',
+      '',
+      '1. spec_recall → spec_triage（此类需求通常 L2，问上面 3 条）→ spec_distill',
+      '2. 先读参考页 index.vue，抄它的 page-header + btn-export 结构',
+      '3. 导出走浏览器原生 Blob 下载',
+      '',
+      '## 禁区',
+      '',
+      '- 不改 newShare 下的源 HTML',
+      '',
+      '## 验收标准',
+      '',
+      '- 页面可正常打开且导出可用',
+    ].join('\n'),
+  }
+}
+
+test('renderInjection：fastTrack 时不注入澄清清单（与"禁止追问"冲突）', () => {
+  const out = renderInjection({
+    results: [{ template: tplWithFlow(), score: 0.4, hit: true }],
+    redlines: [],
+    fastTrack: true,
+  })
+  assert.ok(!out.includes('澄清清单：'), 'fastTrack 下不得出现澄清清单')
+  assert.ok(!out.includes('页面形态：纯展示还是可交互？'), '澄清问题本身也不该出现')
+  assert.ok(out.includes('已省略'), '应说明为何省略，避免模型误以为模板没有澄清清单')
+})
+
+test('renderInjection：fastTrack 时滤掉"去调插件工具"的流程行（与首行指令冲突）', () => {
+  const out = renderInjection({
+    results: [{ template: tplWithFlow(), score: 0.4, hit: true }],
+    redlines: [],
+    fastTrack: true,
+  })
+  assert.ok(!/spec_recall\s*→\s*spec_triage/.test(out), '不得注入 spec_recall → spec_triage 流程行')
+  assert.ok(!out.includes('spec_distill'), '不得注入 spec_distill')
+  assert.ok(out.includes('先读参考页 index.vue'), '改法的实质内容要保留')
+  assert.ok(out.includes('导出走浏览器原生 Blob'), '改法的实质内容要保留')
+  assert.ok(out.includes('不改 newShare 下的源 HTML'), '区块禁区要保留')
+  assert.ok(out.includes('页面可正常打开且导出可用'), '验收标准要保留')
+})
+
+test('renderInjection：非 fastTrack 时行为不变（澄清清单与流程行照旧注入）', () => {
+  const out = renderInjection({
+    results: [{ template: tplWithFlow(), score: 0.4, hit: true }],
+    redlines: [],
+  })
+  assert.ok(out.includes('澄清清单：'), '非 fastTrack 下澄清清单应保留')
+  assert.ok(out.includes('页面形态：纯展示还是可交互？'))
+  assert.ok(/spec_recall\s*→\s*spec_triage/.test(out), '非 fastTrack 下流程行保留（此时它是对的）')
+  assert.ok(!out.includes('已省略'))
+})
+
+test('renderInjection：fastTrack 下模板体积明显小于非 fastTrack', () => {
+  const args = { results: [{ template: tplWithFlow(), score: 0.4, hit: true }], redlines: [] }
+  const fast = renderInjection({ ...args, fastTrack: true })
+  const full = renderInjection({ ...args, fastTrack: false })
+  assert.ok(fast.length < full.length, `fastTrack 应更短：${fast.length} vs ${full.length}`)
+})

@@ -27,6 +27,7 @@ import {
   collectRedlines,
   copyTree,
   dataRoot,
+  dedupeRedlines,
   describeStore,
   isCrossDrive,
   liftLegacyNesting,
@@ -207,21 +208,25 @@ export function apply(ctx, config) {
         const hitTemplates = results.filter((r) => r.hit)
         const redlines = collectRedlines(home, scope, hitTemplates.map((r) => r.template))
 
-        const injection = renderInjection({
-          results,
-          redlines,
-          maxTemplates: config.maxInjectTemplates,
-          maxChars: config.injectMaxChars,
-        })
-
         // 0.4.0：召回时顺带给出复杂度分级 —— L1 据此可跳过 spec_triage/spec_distill 两次往返
         // 0.4.3：分级行改成「执行路径」指令式表述，并新增 nextStep 字段。
         //   背景：实测中模型会把 SKILL.md「第 2 步（必做）」当成无条件规则，即使召回已判定
         //   fastTrack 也照样调 spec_triage/spec_distill，一次简单改页面的需求白跑 2 次往返。
         //   修法：把「下一步」写成模型可见的硬指令（nextStep + 首行路径说明），不再只靠隐含约定。
+        // 0.4.5：fastTrack 必须在渲染注入之前算出来 —— 注入侧要据此省掉
+        //   「澄清清单 + 体检流程行」（那两块与"禁止追问/不要调 triage"冲突，且占返回量七成）。
         const level = classification.level
         const fastTrack = classification.fastTrack === true
         const nextStep = fastTrack ? 'implement' : 'triage'
+
+        const injection = renderInjection({
+          results,
+          redlines,
+          fastTrack,
+          maxTemplates: config.maxInjectTemplates,
+          maxChars: config.injectMaxChars,
+        })
+
         const levelLine = fastTrack
           ? '> **执行路径：1 步直达。** fastTrack=true（L1 原子改动 / 自包含新建 / 用户已要求不追问）。\n' +
             '> **下一步就是实现**：禁止追问；**不要调用 `spec_triage`，也不要调用 `spec_distill`**（本条已替代它们的产出）。\n' +
@@ -458,9 +463,10 @@ export function apply(ctx, config) {
         const existing = listTemplates(home, scope).find((t) => t.id === id)
         const updated = Boolean(existing)
 
-        // 禁区合并：新模板的禁区 + 项目档案既有禁区，去重
+        // 禁区合并：新模板的禁区 + 项目档案既有禁区，近重复去重
+        // 0.4.5：原来只做 `new Set` 字符串级去重，同一规则换个括号说明或改个语序就漏过去了。
         const profile = readProfile(home, hash)
-        const redlines = [...new Set([...(args.redlines ?? []), ...profile.redlines])]
+        const redlines = dedupeRedlines([...(args.redlines ?? []), ...profile.redlines])
 
         const body = renderTemplateMarkdown({
           name: args.name,
@@ -520,7 +526,7 @@ export function apply(ctx, config) {
           try {
             writeProfile(home, hash, {
               repoName: profile.repoName || cwd,
-              redlines: [...new Set([...profile.redlines, ...(args.redlines ?? [])])],
+              redlines: dedupeRedlines([...profile.redlines, ...(args.redlines ?? [])]),
               conventions: profile.conventions,
               notes: profile.notes,
             })
