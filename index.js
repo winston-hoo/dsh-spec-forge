@@ -102,15 +102,13 @@ export function apply(ctx, config) {
       order: 150,
       text: [
         '## 需求锻造（spec-forge）',
-        '编程需求：spec_recall →（按需 spec_triage / spec_distill）→ 实现 → 收尾 spec_retro。',
-        '1. 先 spec_recall（传原文），返回历史模板、项目禁区与 fastTrack。',
-        '2. fastTrack=true（L1）：禁止追问，跳过 triage/distill，直接实现；疑虑写 `// TODO: [待确认]` 并在报告点出。',
-        '   否则看 spec_triage 等级：L2 按报告默认值执行、禁止追问（仅"过短且零锚点"会让你一次问清再动手）；',
-        '   L3 完整先问后查。含"直接做/速做/不用问/别问/不要问/极速模式"→ 无条件 fastTrack。',
-        '   仅 L3 与 L2 安全阀可 ask_user_question；提问前禁用任何文件类工具（read/grep/glob/bash/ls），一次问完。',
-        '3. 大文件纪律：>20K 字符的文件禁止整文件 read，先 grep 定位再分段读；确需整读先落要点摘要。',
-        '4. 收尾过复用价值三问（还会照做/跨项目成立/会反复提）后 spec_retro 一次；纯问答、只读诊断、',
-        '   报错排查、环境修复不沉淀；用户明确要求时无条件沉淀。',
+        '编程需求：先 `spec_recall`（传原文），然后**严格按返回的 `nextStep` 执行**，不自作主张加步骤。',
+        '- `nextStep=implement`（fastTrack=true）：禁止追问，**不要再调 `spec_triage`/`spec_distill`**（召回正文已替代其产出）；直接实现，疑虑写 `// TODO: [待确认]` 并在报告点出。',
+        '- `nextStep=triage`（fastTrack=false）：再调 `spec_triage`，按报告执行 —— L2 按默认值、禁止追问；L3 先问后查（可 ask_user_question，提问前禁用文件类工具）。',
+        '用户说"不用问/直接做/速做"等 → 无条件 fastTrack。',
+        '大文件纪律：>20K 字符的文件禁止整文件 read，先 grep 定位再分段读；确需整读先落要点摘要。',
+        '收尾过复用价值三问（还会照做/跨项目成立/会反复提）后 `spec_retro` 一次；纯问答、只读诊断、环境修复、',
+        'L1 原子小改（改文案/调样式/加按钮/加列）不沉淀；用户明确要求时无条件沉淀。',
         '禁区（项目档案/模板注入）是硬约束，不得修改。',
       ].join('\n'),
     })
@@ -146,7 +144,7 @@ export function apply(ctx, config) {
     defineTool({
       name: 'spec_recall',
       description:
-        '检索历史提示词模板库，返回命中模板（澄清清单/标准改法/验收标准）、本项目禁区，以及复杂度分级（level 与 fastTrack）。用户提出编程需求时在任何代码改动之前调用，是硬性前置步骤。',
+        '检索历史提示词模板库，返回命中模板（澄清清单/标准改法/验收标准）、本项目禁区，以及复杂度分级（level、fastTrack 与 nextStep）。用户提出编程需求时在任何代码改动之前调用，是硬性前置步骤。',
       parameters: {
         requirement: {
           type: 'string',
@@ -169,7 +167,12 @@ export function apply(ctx, config) {
             templates: { type: 'array' },
             notice: { type: 'string' },
             level: { type: 'number', description: '复杂度等级 1|2|3' },
-            fastTrack: { type: 'boolean', description: 'true 时可跳过 spec_triage 与 spec_distill，直接实现' },
+            fastTrack: { type: 'boolean', description: 'true 时直接实现，禁止调用 spec_triage 与 spec_distill' },
+            nextStep: {
+              type: 'string',
+              required: true,
+              description: "下一步动作指令：'implement'（fastTrack，直接改代码）| 'triage'（先调 spec_triage）",
+            },
           },
         },
         render: (_args, value) => [{ type: 'text', text: value.context + (value.notice ? `\n\n${value.notice}` : '') }],
@@ -208,15 +211,22 @@ export function apply(ctx, config) {
         })
 
         // 0.4.0：召回时顺带给出复杂度分级 —— L1 据此可跳过 spec_triage/spec_distill 两次往返
+        // 0.4.3：分级行改成「执行路径」指令式表述，并新增 nextStep 字段。
+        //   背景：实测中模型会把 SKILL.md「第 2 步（必做）」当成无条件规则，即使召回已判定
+        //   fastTrack 也照样调 spec_triage/spec_distill，一次简单改页面的需求白跑 2 次往返。
+        //   修法：把「下一步」写成模型可见的硬指令（nextStep + 首行路径说明），不再只靠隐含约定。
         const level = classification.level
         const fastTrack = classification.fastTrack === true
+        const nextStep = fastTrack ? 'implement' : 'triage'
         const levelLine = fastTrack
-          ? '> **分级：L1 快速通道（fastTrack=true）** —— 禁止追问；跳过 spec_triage 与 spec_distill，直接实现。\n\n'
-          : `> **分级：L${level}** —— ${
-              level === 3
-                ? 'L3 架构重构，先问后查（可 ask_user_question）。'
-                : 'L2 模块变更，按报告默认值执行、禁止追问。'
-            }\n\n`
+          ? '> **执行路径：1 步直达。** fastTrack=true（L1 原子改动 / 自包含新建 / 用户已要求不追问）。\n' +
+            '> **下一步就是实现**：禁止追问；**不要调用 `spec_triage`，也不要调用 `spec_distill`**（本条已替代它们的产出）。\n' +
+            '> 直接改代码，疑虑写 `// TODO: [待确认] <内容>`，最终报告里点出。\n\n'
+          : `> **执行路径：先体检。** fastTrack=false（level=L${level}）。\n` +
+            '> **下一步调用 `spec_triage`**（传同一份原文），按它给出的清单再动手：' +
+            (level === 3
+              ? 'L3 完整先问后查（可 ask_user_question，提问前禁用文件类工具）。\n\n'
+              : 'L2 按报告默认值执行、禁止追问（仅"过短且零锚点"会让你一次问清再动手）。\n\n')
         const context = levelLine + injection
 
         const notice = buildRecallNotice(exec, state, config)
@@ -235,6 +245,7 @@ export function apply(ctx, config) {
           notice,
           level,
           fastTrack,
+          nextStep,
         }
       },
     })
@@ -246,16 +257,12 @@ export function apply(ctx, config) {
     defineTool({
       name: 'spec_triage',
       description:
-        '四维需求体检（要实现什么/怎么改/哪些不能改/上下文）并标注 Level，返回可直接执行的报告：L1 出执行清单（禁追问）；L2 出默认值清单（按默认执行、禁追问，仅"过短且零锚点"时转为一次性追问）；L3 出完整追问清单。仅当 spec_recall 返回 fastTrack=false 时调用。',
+        '四维需求体检（要实现什么/怎么改/哪些不能改/上下文）并标注 Level，返回可直接执行的报告：L1 出执行清单（禁追问）；L2 出默认值清单（按默认执行、禁追问，仅"过短且零锚点"时转为一次性追问）；L3 出完整追问清单。**仅当 spec_recall 返回 fastTrack=false 时调用；fastTrack=true 时不要调用本工具。**',
       parameters: {
         requirement: {
           type: 'string',
           required: true,
           description: '用户的原始需求描述',
-        },
-        cwd: {
-          type: 'string',
-          description: '当前工作目录绝对路径',
         },
       },
       output: {
@@ -274,25 +281,13 @@ export function apply(ctx, config) {
         },
         render: (_args, value) => [{ type: 'text', text: value.report }],
       },
-      async execute(args, exec) {
+      async execute(args) {
+        // 0.4.3：不再在这里重跑 listTemplates + rankTemplates。
+        // 旧实现为了给报告追加「历史模板的澄清清单」，把 spec_recall 刚做过的
+        // 「全量模板扫描 + 指纹 + 余弦打分」又完整做了一遍 —— 纯重复劳动；
+        // 而这份澄清清单早已随 spec_recall 的注入正文进入上下文，本次不再重复计算。
         const result = triageRequirement(args.requirement)
-
-        // 若有命中模板，把它的澄清清单作为追加确认项，实现「模板越用越贴合」
-        const scope = repoHash(resolveCwd(args.cwd, exec))
-        const templates = listTemplates(home, scope)
-        const results = rankTemplates({
-          queryFp: buildQueryFp(args.requirement),
-          templates,
-          repoHash: scope,
-          threshold: config.matchThreshold,
-          limit: 1,
-        })
-        const hints = results
-          .filter((r) => r.hit)
-          .flatMap((r) => bulletsOf(sectionOf(r.template.body, SECTIONS.clarify)))
-          .slice(0, 5)
-
-        const report = renderTriageReport(result, { templateHints: hints })
+        const report = renderTriageReport(result)
 
         const level = result.classification.level
         const mode = level === 1 ? 'fast-track' : result.needsClarify ? 'clarify' : 'ready'
