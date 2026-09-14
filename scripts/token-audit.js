@@ -55,7 +55,7 @@ if (sysMatch) {
   sysText = lines.join('\n')
 }
 const sysToks = estTokens(sysText)
-// SYS_BUDGET 是**参考线，不是硬限制**（0.4.3 明确）：
+// SYS_BUDGET 是**参考线，不是硬限制**（0.4.4 明确）：
 // dsh 的 renderPrompt 只把两侧 sections 按 order 排序后 join('\n\n')，
 // 没有任何截断或长度上限（依据 packages/core/system-prompt/src/index.ts 的 renderPrompt）。
 // 因此超线只意味着"每轮多花几个 token"，**不会导致指令被裁剪或丢失**。
