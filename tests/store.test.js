@@ -13,6 +13,7 @@ import {
   collectRedlines,
   copyTree,
   dataRoot,
+  dedupeRedlines,
   isCrossDrive,
   liftLegacyNesting,
   listTemplates,
@@ -556,3 +557,74 @@ test('layoutNotice：旧目录上移后若非空（有跳过项）则保留，�
 function readFileContent(file) {
   return readFileSync(file, 'utf8')
 }
+
+// ---------- 0.4.5：禁区近重复去重 ----------
+
+test('dedupeRedlines：括号说明不同但规则相同的条目会被合并（真实 example-admin 用例）', () => {
+  const out = dedupeRedlines([
+    'package.json 不新增依赖（需要 zip/导出时用浏览器原生 Blob，不引 jszip）',
+    'package.json 不新增依赖（项目已登记禁区）',
+  ])
+  assert.equal(out.length, 1, '两条是同一规则')
+  assert.ok(out[0].includes('不引 jszip'), '应保留信息量更大的那条')
+})
+
+test('dedupeRedlines：改写了语序的近重复条目也会被合并（真实 example-admin 用例）', () => {
+  const out = dedupeRedlines([
+    'example-admin/dist 是 git 跟踪的目录，vite build 默认 emptyOutDir 会清空它；验证构建必须显式 --outDir 到临时目录，事后清理；若已误写，用 git checkout HEAD -- example-admin/dist 还原',
+    '验证构建必须显式 --outDir 到临时目录并事后清理；example-admin/dist 是 git 跟踪目录，被误写用 git checkout HEAD -- example-admin/dist 还原',
+  ])
+  assert.equal(out.length, 1, '两条是同一规则的不同写法')
+  assert.ok(out[0].startsWith('example-admin/dist'), '应保留更完整的那条')
+})
+
+test('dedupeRedlines：不同规则不得被误合并', () => {
+  const out = dedupeRedlines([
+    'design/*.html 是设计稿基准，只读参考，任何情况下不改',
+    'dynamic-routes.js 的双重限制机制不得弱化：只往 ROUTE_RECORDS 加登记',
+    '只在 vite.config.js 兜底，不动业务源码',
+    '不要用 server.watch.usePolling 替代忽略规则（CPU 代价高）',
+  ])
+  assert.equal(out.length, 4, '四条互不相同，不该被合并')
+})
+
+test('dedupeRedlines：内容相近但确实是两条规则的不得被合并', () => {
+  // 注意：不要用「第一条规则…」「第二条规则…」这类只差开头两字的假数据当反例 ——
+  // 它们共享 7/9 个 bigram，被判重复是算法的正确行为。
+  const out = dedupeRedlines([
+    '不要改 vite.config.js 里 watch.ignored 与 watcher error 监听这两层兜底',
+    '不新增 npm 依赖，导出功能用浏览器原生 Blob 实现',
+    '临时探针脚本用完必须删除，不留 __probe 残留',
+  ])
+  assert.equal(out.length, 3, '三条讲的是不同的事，不该被合并')
+})
+
+test('dedupeRedlines：空串与纯空白被丢弃，且保持原顺序', () => {
+  const out = dedupeRedlines(['不要动全局配置文件里的任何字段', '   ', '', '导出一律走浏览器原生 Blob 下载'])
+  assert.deepEqual(out, ['不要动全局配置文件里的任何字段', '导出一律走浏览器原生 Blob 下载'])
+})
+
+test('parseProfile：读档案时就做近重复去重（读路径同时服务注入与写盘，写回即自愈）', () => {
+  const md = [
+    '---',
+    "repoName: 'demo'",
+    '---',
+    '## 禁区',
+    '',
+    '- package.json 不新增依赖（需要 zip/导出时用浏览器原生 Blob，不引 jszip）',
+    '- package.json 不新增依赖（项目已登记禁区）',
+    '- 不要改 vite.config.js 的兜底配置',
+    '',
+    '## 约定',
+    '',
+    '（暂无）',
+    '',
+    '## 备注',
+    '',
+    '（暂无）',
+    '',
+  ].join('\n')
+  const p = parseProfile(md)
+  assert.equal(p.redlines.length, 2, '两条 package.json 规则应合并为一条')
+  assert.equal(p.repoName, 'demo')
+})

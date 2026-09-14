@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { fingerprint, inferQueryTags, toWeightMap } from '../lib/fingerprint.js'
+import { downweightGenericBasenames, fingerprint, inferQueryTags, toWeightMap } from '../lib/fingerprint.js'
 import { cosine, coverage, jaccard, popularity, rankTemplates, recency, scoreTemplate } from '../lib/match.js'
 
 const NOW = Date.parse('2026-09-04T00:00:00Z')
@@ -172,4 +172,90 @@ test('scoreTemplate：一级分类相同即计同分类（二级自由填写）'
   const qp2 = fingerprint('Vue 管理页表单')
   qp2.category = 'bugfix/null' // 一级不同
   assert.equal(scoreTemplate({ queryFp: qp2, template, now: NOW }).breakdown.sameCategory, 0)
+})
+
+// ---------- 0.4.5：先验分不得脱离词汇证据 ----------
+
+test('scoreTemplate：零词汇重叠时，同分类/同仓库的先验分不得把模板顶过阈值（0.4.5）', () => {
+  const template = {
+    id: 'tpl-aaaaaaaaaa',
+    category: 'frontend/page',
+    tags: ['vue'],
+    // 与查询「登录页加个按钮」没有任何共同 token
+    fingerprint: [{ token: 'export', weight: 3 }],
+    repo: 'repo1',
+    hitCount: 3,
+    lastUsed: new Date(NOW).toISOString(),
+  }
+  const qp = fingerprint('登录页加个按钮')
+  qp.category = 'frontend'
+
+  const r = scoreTemplate({ queryFp: qp, template, repoHash: 'repo1', now: NOW })
+
+  assert.equal(r.breakdown.lexical, 0, '两侧应无任何词面交集')
+  assert.equal(r.breakdown.hasLexicalEvidence, false)
+  // 先验分仍然计入（用于排序），只是不再单独构成"命中"
+  assert.ok(r.score > 0.2, `先验分应仍然计入排序，实际 score=${r.score}`)
+  assert.equal(r.hit, false, '没有词汇证据就不该命中，哪怕分数已经很接近阈值')
+})
+
+test('scoreTemplate：对照——同样的先验条件，只要有词汇交集就仍可命中', () => {
+  const mk = (fpTokens) => ({
+    id: 'tpl-bbbbbbbbbb',
+    category: 'frontend/page',
+    tags: ['vue'],
+    fingerprint: fpTokens,
+    repo: 'repo1',
+    hitCount: 3,
+    lastUsed: new Date(NOW).toISOString(),
+  })
+  const qp = fingerprint('登录页加个按钮 表单字段')
+  qp.category = 'frontend'
+
+  const withEvidence = scoreTemplate({ queryFp: qp, template: mk([{ token: '表单', weight: 3 }]), repoHash: 'repo1', now: NOW })
+  assert.equal(withEvidence.breakdown.hasLexicalEvidence, true)
+  assert.equal(withEvidence.hit, true, `有词汇交集时应能命中，实际 score=${withEvidence.score}`)
+})
+
+test('回归：只共享通用基名 index.vue 的无关模板不得命中（0.4.5 实测假阳性）', () => {
+  // 复刻真实假阳性：需求「…/login/index.vue 登录页加个按钮」命中了
+  // 一份讲「design 设计稿落成 admin 页面」的模板，唯一交集是 index.vue，
+  // 旧版靠 w=4 的它 + 先验分拿到 0.372 越过阈值。
+  const template = {
+    id: 'tpl-cccccccccc',
+    category: 'frontend/page',
+    tags: ['vue'],
+    fingerprint: [
+      { token: 'index.vue', weight: 4 },
+      { token: 'materials', weight: 4 },
+      { token: 'src/views/example-admin/materials', weight: 4 },
+    ],
+    repo: 'repo1',
+    hitCount: 2,
+    lastUsed: new Date(NOW).toISOString(),
+  }
+  const qp = fingerprint('@example-admin/src/views/login/index.vue 登录页加个按钮')
+  qp.category = 'frontend'
+
+  const r = scoreTemplate({ queryFp: qp, template, repoHash: 'repo1', now: NOW })
+  assert.equal(r.hit, false, `唯一交集是通用基名，不该命中（score=${r.score}）`)
+  assert.ok(r.score < 0.35, `分数应降到阈值之下，实际 ${r.score}`)
+})
+
+test('通用基名降权：index.vue 不再吃满路径权重，但完整路径仍保留', () => {
+  const fpMap = new Map(fingerprint('a/src/views/login/index.vue').map((t) => [t.token, t.weight]))
+  assert.equal(fpMap.get('index.vue'), 1, 'index.vue 这类通用基名应降到最低权重')
+  assert.equal(fpMap.get('a/src/views/login/index.vue'), 4, '完整路径仍是最高权重（区分度在这里）')
+  assert.equal(fpMap.get('login'), 3, '非通用目录名不受影响')
+})
+
+test('downweightGenericBasenames：对已落盘的老指纹同样生效（不改磁盘数据）', () => {
+  const list = [
+    { token: 'index.vue', weight: 4 },
+    { token: '导出', weight: 3 },
+  ]
+  const m = downweightGenericBasenames(list)
+  assert.equal(m.get('index.vue'), 1)
+  assert.equal(m.get('导出'), 3)
+  assert.equal(list[0].weight, 4, '不应就地修改传入的原始数据')
 })
