@@ -176,11 +176,17 @@ env -u NODE_OPTIONS pnpm update dsh-spec-forge
 
 本仓库 `dev/` 下的 patch 含本机绝对路径、已被 `.gitignore` 排除，仅供本地调试。
 
-### 编写插件时的两个必踩坑
+### 编写插件时的三个必踩坑
 
 1. **object 类型的 output schema 必须写 `additionalProperties: true/false`**，
    否则插件树加载失败、harness 直接启不来（`UNSUPPORTED_SCHEMA`）。给 schema 新增任何 object 字段都要带上。
-2. **Profile 目录本身是 pnpm workspace 根目录**，在该目录直接 `add` 可能需要 `-w`。
+2. **配置 schema 必须导出成 `Config`，不能叫 `schema`**（0.6.4 事故）。
+   cordis 的 `resolveConfig` 是 `if (!runtime.Config) return config;` —— 导出名不对就等于
+   **配置从不校验、默认值从不填充**：profile patch 里少写一个键，插件读到的是 `undefined` 而不是
+   schema 里声明的默认值。于是 `if (config.preStepRouting && …)` 这种写法会静默跳过整段逻辑
+   （0.5.0～0.6.3 的注入从未注册过，线上却看不出任何异常）。
+   两道防线：① 导出名用 `Config`；② 读开关一律写 `!== false`，让"缺键"等价于"默认开启"。
+3. **Profile 目录本身是 pnpm workspace 根目录**，在该目录直接 `add` 可能需要 `-w`。
 
 ### 卸载
 
@@ -197,7 +203,7 @@ dsh web   # 重启生效
 ## 五、验证
 
 ```bash
-npm test            # 单元测试：222 个（含契约护栏与 0.4.7 回归）
+npm test            # 单元测试：224 个（含契约护栏、配置契约与 0.4.7 回归）
 npm run smoke       # 端到端冒烟：沉淀→召回→注入→体检→完成判定→幂等 整条链路
 npm run verify      # 加载验证：mock ctx 执行 apply()，确认工具都能注册、schema 合规
 npm run token-audit # 静态 token 预算审计：常驻/工具定义/SKILL/单次调用产出/真实库命中注入

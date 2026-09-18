@@ -12,7 +12,7 @@
 //   skills       —— 可选，用 ctx.get 探测
 
 import { createHash, randomUUID } from 'node:crypto'
-import { appendFileSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -53,7 +53,11 @@ export const name = 'spec-forge'
 // 只把 tools 作为硬依赖；systemPrompt / skills 用 ctx.get 探测，缺失也能跑。
 export const inject = ['tools']
 
-export const schema = Schema.object({
+// 配置 schema 必须导出成 `Config`：cordis 的 resolveConfig 只认这个键 ——
+//   `if (!runtime.Config) return config;`
+// 不导出它就等于**从不校验、也从不填默认值**：配置里少写一个键（例如 profile patch 没写
+// preStepRouting）会原样变成 undefined。0.6.4 之前这里叫 `schema`，于是所有默认值形同虚设。
+export const Config = Schema.object({
   autoRecall: Schema.boolean().default(true).description('是否在收到编程需求时自动召回历史模板'),
   autoRetro: Schema.boolean().default(true).description('是否在任务完成后提示沉淀复盘'),
   matchThreshold: Schema.number().min(0).max(1).default(0.35).description('模板命中阈值，0~1，越低越容易命中'),
@@ -73,6 +77,9 @@ export const schema = Schema.object({
     .default(true)
     .description('提炼提示词时若未声明禁区：是否在提示词里插入警告、并回传 missingConstraints=true（模型据此先补问再动手）。关闭后不再警告'),
 })
+
+/** 同一份 schema 的旧名（0.6.4 之前的导出名）。仅为兼容既有测试与文档引用保留。 */
+export const schema = Config
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
@@ -100,7 +107,7 @@ export function apply(ctx, config) {
   // ---------- 第 1 层：常驻系统提示词（必须短，0.3.2 精简后约 400 token/请求） ----------
 
   const systemPrompt = ctx.get('systemPrompt')
-  if (systemPrompt?.section && config.autoRecall) {
+  if (systemPrompt?.section && config.autoRecall !== false) {
     systemPrompt.section({
       name: 'spec-forge:routing',
       order: 150,
@@ -154,124 +161,57 @@ export function apply(ctx, config) {
   //   ① 判据与 spec_recall 同源（同一个 classifyComplexity、同一份需求原文）→ 结论不可能打架；
   //   ② 只注入两种"最容易走错"的情形（见 renderPreStepNotice），triage 不注入，省 token；
   //   ③ 全程 try/catch + 幂等：任何异常都原样放行（返回下游 decision），绝不拖垮本轮。
-  if (config.preStepRouting && typeof ctx.on === 'function') {
-    // 0.6.2（诊断版）：把每次 pre-step 调用的判定结果落一行 JSON，用来回答"到底哪一步没走到"。
-    // 这是临时埋点，验证完即删 —— 它不参与任何业务逻辑，失败也绝不影响本轮。
-    const traceFile = join(home, 'prestep-trace.log')
-    const trace = (entry) => {
-      try {
-        if (statSync(traceFile, { throwIfNoEntry: false })?.size > 256 * 1024) return
-        mkdirSync(home, { recursive: true })
-        appendFileSync(traceFile, `${JSON.stringify({ t: new Date().toISOString(), ...entry })}\n`)
-      } catch {
-        /* 诊断不拖垮主流程 */
-      }
-    }
-    const seenKeys = new Set()
-    // 实验（0.6.3 诊断）：同一个 handler 注册到不同落点。Cordis 的事件过滤（dsh-scope 的
-    // scopeTarget）按监听器 ctx 的 scope 标签决定派发与否 —— profile 层加载的插件拿到的 ctx
-    // 若带了标签、且该标签不是该 agent 作用域的祖先，就永远收不到 agent 事件。
-    const makeHandler = (label) => async (payload, next) => {
+  // 注意这里是 `!== false` 而不是直接取真值：配置来自 profile 的 patch 层，**少写一个键不该
+  // 关掉一个功能**。0.6.4 之前正是 `config.preStepRouting &&`，而 profile 没写这个键 →
+  // undefined → 整个注入块被静默跳过，监听器从 0.5.0 起就没注册过（根因见 CHANGELOG 0.6.4）。
+  if (config.preStepRouting !== false && typeof ctx.on === 'function') {
+    // 同一轮内已注入过的需求（`轮次:原文哈希`）。会话消息只在本轮第一步的 payload 里，
+    // 多 step 时靠它兜底，避免每个 step 都注入一遍。
+    const injected = new Set()
+    const preStep = async (payload, next) => {
       const decision = await next()
       try {
-        if (!decision || decision.kind === 'reject') {
-          trace({ event: 'passthrough-reject', label })
-          return decision
-        }
+        if (!decision || decision.kind === 'reject') return decision
         payload?.signal?.throwIfAborted?.()
         // 内置插件（dsh-tool-skill / dsh-repeat-tool-reminder）判定时读的都是 payload.messages；
         // 0.6.2 起跟随它们：payload 里没有才退回 decision.messages。
         const claimed = Array.isArray(payload?.messages) ? payload.messages : []
         const entering = Array.isArray(decision.messages) ? decision.messages : []
-        const pool = claimed.length > 0 ? claimed : entering
-        const requirement = pickRequirementMessage(pool)
-        const shape = {
-          label,
-          turn: payload?.turn,
-          step: payload?.step,
-          claimed: claimed.length,
-          entering: entering.length,
-          roles: pool.map((m) => `${m?.role ?? '-'}:${m?.source?.kind ?? '-'}`).slice(0, 6),
-          picked: requirement ? requirement.source?.kind ?? 'no-kind' : null,
-          pickedText: requirement ? messageTextOf(requirement).slice(0, 40) : null,
-        }
-        if (!requirement) {
-          trace({ ...shape, event: 'no-requirement' })
-          return decision
-        }
+        const requirement = pickRequirementMessage(claimed.length > 0 ? claimed : entering)
+        if (!requirement) return decision
         const requirementText = messageTextOf(requirement)
         // ponytail: 幂等只按「需求原文哈希 + 轮次」判定，不做语义去重 —— 用户换句话复述同一需求
         // 会被当成新需求再注入一次（代价约 140 token）。上限：改写后重复注入；
         // 升级触发：真实会话里观察到这种重复噪声，再考虑按指纹相似度合并。
         const digest = shortDigest(requirementText)
         const turn = payload?.turn
-        // 幂等：同一轮里同一条需求只注入一次（多 step / 会话重放 / 多落点注册同样安全）
         const key = `${turn}:${digest}`
-        const already =
-          seenKeys.has(key) ||
-          [...claimed, ...entering].some(
-            (m) =>
-              m?.source?.plugin === PLUGIN_ID &&
-              m?.source?.digest === digest &&
-              (turn === undefined || m?.source?.turn === turn)
-          )
-        if (already) {
-          trace({ ...shape, event: 'duplicate-skip' })
-          return decision
-        }
-        seenKeys.add(key)
+        if (injected.has(key)) return decision
+        // 会话重放（同一轮的消息已在上下文里）同样不能重复注入
+        const already = [...claimed, ...entering].some(
+          (m) =>
+            m?.source?.plugin === PLUGIN_ID &&
+            m?.source?.digest === digest &&
+            (turn === undefined || m?.source?.turn === turn)
+        )
+        if (already) return decision
         const classification = classifyComplexity(requirementText)
         const notice = renderPreStepNotice(classification)
-        if (!notice) {
-          trace({ ...shape, event: 'empty-notice', level: classification.level, charLen: requirementText.length })
-          return decision
-        }
-        trace({
-          ...shape,
-          event: 'inject',
-          level: classification.level,
-          fastTrack: classification.fastTrack === true,
-          noticeChars: notice.length,
-        })
+        if (!notice) return decision
+        injected.add(key)
         return {
           ...decision,
           messages: [...entering, createNoticeMessage(notice, { digest, turn, classification })],
         }
       } catch (err) {
-        trace({ event: 'error', label, message: String(err?.message ?? err) })
         ctx.logger?.warn?.(`[spec-forge] pre-step 注入失败，已忽略（本轮不受影响）: ${err.message}`)
         return decision
       }
     }
-    // 落点/选项实验：同一个 ctx、同一个 handler，只差注册选项。
-    //   global-ctx —— 带 { global: true }：Cordis 的 dispatch 见 hook.global 就直接放行，绕过 scope 过滤
-    //                 （dsh-scope 自己的跨切面不变式监听器就是这么注册的）。
-    //   plain-ctx  —— 不带选项的对照组：它若收到、global 没收到，说明过滤方向与我预期相反。
-    // 谁收到就写谁的 label；两条都收到也不会重复注入（seenKeys 兜底）。
-    const targets = [
-      ['global-ctx', ctx, { global: true }],
-      ['plain-ctx', ctx, undefined],
-    ]
-    for (const [label, target, options] of targets) {
-      if (options === undefined) target.on('agent/pre-step', makeHandler(label))
-      else target.on('agent/pre-step', makeHandler(label), options)
-    }
-    let hooks = []
-    try {
-      hooks = (ctx.events?._hooks?.['agent/pre-step'] ?? []).map((h) => ({
-        name: h?.ctx?.name ?? null,
-        self: h?.ctx === ctx,
-        global: h?.global === true,
-      }))
-    } catch {
-      /* 内部结构变了就跳过，别拖垮加载 */
-    }
-    trace({
-      event: 'boot',
-      registeredOn: targets.map(([label]) => label),
-      hookCount: hooks.length,
-      hooks,
-    })
+    // `{ global: true }`：`agent/*` 是「作用域过滤事件」，Cordis 派发时按监听器 ctx 的 scope 标签筛
+    // （dsh-scope 的 scopeTarget：无标签或标签是祖先才放行）。插件自己的 ctx 无标签时本就通过，
+    // 带上这个选项连"ctx 被打上标签"的情形也一并覆盖；dsh-scope 的跨切面不变式监听器也这么注册。
+    ctx.on('agent/pre-step', preStep, { global: true })
   }
 
   // ---------- 第 4 层：兜底提醒（模型漏调 spec_retro 时提示） ----------
@@ -764,7 +704,7 @@ function buildQueryFp(requirement) {
 }
 
 function buildRecallNotice(exec, state, config) {
-  if (!config.autoRetro) return ''
+  if (config.autoRetro === false) return ''
   const session = exec?.agent?.session
   const sessionId = session?.id
   if (!sessionId || state.retroDone.has(sessionId)) return ''
@@ -777,7 +717,8 @@ function buildRecallNotice(exec, state, config) {
   const completion = isSessionComplete(session)
   const gate = evaluateRetroEligibility(facts, {
     minToolCalls: config.retroMinToolCalls,
-    requireCodeChange: config.retroRequireCodeChange,
+    // 缺键 = 保持 schema 默认（true）；只有显式 false 才关掉"必须真改过代码"这道门槛。
+    requireCodeChange: config.retroRequireCodeChange !== false,
     sessionComplete: completion.complete,
   })
   if (!gate.eligible) return ''

@@ -10,7 +10,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { apply } from '../index.js'
+import { apply, Config } from '../index.js'
 
 const CWD = 'D:/plugin-test-demo'
 
@@ -29,14 +29,14 @@ function fakeSession({ turnEndKind = 'completed', cwd = CWD } = {}) {
   }
 }
 
-/** 启动一个插件实例，返回注册出来的工具表 + 捕获到的常驻提示段 + 事件处理器 */
-function boot(overrides = {}) {
+/** mock ctx：tools / systemPrompt / on / logger。boot 与 bootRaw 共用，保证两者处境一致 */
+function makeCtx() {
   const tools = new Map()
   const handlers = new Map()
-  let section = null
+  const box = { section: null }
   const ctx = {
     tools: { register: (tool) => tools.set(tool.name, tool) },
-    get: (name) => (name === 'systemPrompt' ? { section: (s) => { section = s } } : null),
+    get: (name) => (name === 'systemPrompt' ? { section: (s) => { box.section = s } } : null),
     on: (event, fn) => {
       const list = handlers.get(event) ?? []
       list.push(fn)
@@ -44,6 +44,12 @@ function boot(overrides = {}) {
     },
     logger: { info: () => {}, warn: () => {} },
   }
+  return { ctx, tools, handlers, box }
+}
+
+/** 启动一个插件实例，返回注册出来的工具表 + 捕获到的常驻提示段 + 事件处理器 */
+function boot(overrides = {}) {
+  const { ctx, tools, handlers, box } = makeCtx()
   const config = {
     autoRecall: true,
     autoRetro: true,
@@ -60,7 +66,14 @@ function boot(overrides = {}) {
     ...overrides,
   }
   apply(ctx, config)
-  return { tools, section, handlers, config }
+  return { tools, section: box.section, handlers, config }
+}
+
+/** 原样把 config 喂给 apply（不过 schema）—— 复刻"profile patch 里少写了键"的真实处境 */
+function bootRaw(rawConfig) {
+  const { ctx, tools, handlers, box } = makeCtx()
+  apply(ctx, rawConfig)
+  return { tools, section: box.section, handlers, config: rawConfig }
 }
 
 const exec = (session) => ({ agent: { session } })
@@ -262,19 +275,51 @@ test('pre-step：没有真实用户消息时，绝不把 runtime-context 当成�
   assert.equal(decision.messages.filter((m) => m.source?.plugin === 'dsh-spec-forge').length, 0)
 })
 
-test('pre-step：诊断埋点会把每次判定落一行 JSON（0.6.2 临时，验证完随埋点一起删）', async () => {
-  const tmp = mkdtempSync(join(tmpdir(), 'spec-forge-trace-'))
-  try {
-    const home = join(tmp, 'sf')
-    const { handlers } = boot({ storageHome: home })
-    await runPreStep(handlers, [userMessage('直接做：改个文案')], { payload: { messages: [], step: 1 } })
-    const lines = readFileSync(join(home, 'prestep-trace.log'), 'utf8').trim().split('\n')
-    const entry = JSON.parse(lines[lines.length - 1])
-    assert.equal(entry.event, 'inject', `埋点应记录注入，实际 ${entry.event}`)
-    assert.ok(entry.noticeChars > 0, '应记录注入字符数')
-  } finally {
-    rmSync(tmp, { recursive: true, force: true })
+// ---------- 配置契约：0.6.4 事故的护栏 ----------
+// 事故：插件导出的是 `schema` 而不是 `Config`，而 cordis 的 resolveConfig 是
+//   `if (!runtime.Config) return config;`
+// —— 于是配置从不校验、默认值从不填充。profile patch 里没写 preStepRouting，它就是
+// undefined，`if (config.preStepRouting && …)` 直接为假：注入监听器从 0.5.0 起从未注册，
+// 线上表现是"插件看着一切正常，就是从不注入"。以下两条测试专门锁死这一类失效。
+
+test('配置：必须导出 Config，空对象也要被填满默认值（否则 cordis 不会校验）', () => {
+  assert.equal(typeof Config, 'function', '必须导出 Config —— cordis 只认这个键做校验')
+  const filled = Config({})
+  assert.equal(filled.preStepRouting, true, 'preStepRouting 默认必须为 true')
+  assert.equal(filled.autoRecall, true)
+  assert.equal(filled.autoRetro, true)
+  assert.equal(filled.retroRequireCodeChange, true, '缺键时必须默认要求"真改过代码"')
+  assert.equal(filled.storageRoot, 'workspace')
+  assert.equal(filled.matchThreshold, 0.35)
+})
+
+test('配置：profile 那份 config（没有 preStepRouting 键）也必须照常注入', async () => {
+  // 与 profile 的 cordis.patch.yml 一字不差（就是线上跑的那份）
+  const PROFILE_CONFIG = {
+    autoRecall: true,
+    autoRetro: true,
+    matchThreshold: 0.35,
+    maxInjectTemplates: 2,
+    injectMaxChars: 4000,
+    defaultScope: 'project',
+    retroMinToolCalls: 2,
+    strictDistill: true,
   }
+  const { handlers } = bootRaw(PROFILE_CONFIG)
+  assert.equal(
+    (handlers.get('agent/pre-step') ?? []).length,
+    1,
+    '缺键 ≠ 关闭：profile 没写 preStepRouting 时也必须注册注入'
+  )
+  assert.ok(handlers.size >= 1, '事件注册不该被缺键影响')
+  const decision = await runPreStep(handlers, [userMessage('直接做：只回我一句 OK')], {
+    payload: { messages: [], step: 1 },
+  })
+  assert.equal(
+    decision.messages.filter((m) => m.source?.plugin === 'dsh-spec-forge').length,
+    1,
+    '缺键的配置下依然要真的注入'
+  )
 })
 
 test('pre-step：关掉开关后不再注册注入（完全回到常驻段方案）', () => {

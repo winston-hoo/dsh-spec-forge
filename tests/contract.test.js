@@ -32,8 +32,9 @@ const TOOL_NAMES = ['spec_recall', 'spec_triage', 'spec_distill', 'spec_retro']
 
 /** 从 index.js 的 schema 定义里扫出全部配置键（配置的唯一事实来源） */
 function schemaKeys() {
-  const block = /export const schema = Schema\.object\(\{([\s\S]*?)\n\}\)/.exec(INDEX)
-  assert.ok(block, '未能定位 index.js 的 schema 块（护栏失效，先修这里）')
+  // 导出名必须是 Config（cordis 只认它做校验与默认值填充），见 CHANGELOG 0.6.4
+  const block = /export const Config = Schema\.object\(\{([\s\S]*?)\n\}\)/.exec(INDEX)
+  assert.ok(block, '未能定位 index.js 的 Config 块（护栏失效，先修这里）')
   return [...block[1].matchAll(/^ {2}([A-Za-z][A-Za-z0-9]*):/gm)].map((m) => m[1])
 }
 

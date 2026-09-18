@@ -3,6 +3,54 @@
 本插件锁定目标 dsh 版本：`@deepseek-ai/dsh` 0.1.x（developer preview，API 可能有破坏性变更）。
 兼容性以实际安装的 profile 依赖树为准。
 
+## 0.6.4 — 2026-09-18
+
+**真正的根因：配置 schema 导出名写错了 —— 导出的是 `schema`，而 cordis 只认 `Config`。**
+
+cordis 的 `resolveConfig()`（`@deepseek-ai/cordis` lib/index.js:955）：
+
+```js
+function resolveConfig(runtime, config) {
+  if (!runtime.Config) return config;              // ← 只认这个键
+  const result = runtime.Config["~standard"].validate(config);
+  ...
+}
+```
+
+于是这个插件**从来没被校验过、schema 里的默认值一个都没生效**：`config` 就是 profile patch 里
+原样那 8 个键。profile 没写 `preStepRouting` → 它是 `undefined` → 那句
+`if (config.preStepRouting && typeof ctx.on === 'function')` 直接为假 →
+**`agent/pre-step` 监听器从 0.5.0 起一次都没注册过**。所有内置插件导出的都是 `Config`
+（`export { Config, apply, name }`），只有本插件写错了约定。
+
+**证据（全是本地复现，不是推断）**：
+
+| 验证 | 结果 |
+| --- | --- |
+| 真 cordis 加载真插件 + profile 那份 config，数注册的监听器 | 修前 **0 个**，修后 **1 个** |
+| 真 cordis 按 `dsh-agent-loop` 的方式真派发一次 `agent/pre-step` | 修后 decision.messages 里出现第 3 条注入消息（`source.plugin = "dsh-spec-forge"`） |
+| 线上现象对照 | 工具全正常（工具注册在监听器之后）、监听器零调用、埋点一次没落盘 —— 与"整段被跳过"完全吻合 |
+
+**0.6.3 的结论是错的**：那版判断"监听器被 scope 过滤丢掉"，方向不对。本地实验确实证明
+带外来 scope 标签的 ctx 会静默收不到事件，但本插件的 ctx 根本没标签 —— 它压根没走到注册那一步。
+`{ global: true }` 作为无害的保险保留（`dsh-scope` 自己的跨切面监听器也这么注册）。
+
+**连带修好的第二处**：`retroRequireCodeChange` 同样缺键（默认 true），旧代码直接把它传进门槛判定 →
+`undefined` 让"必须真改过代码"这道门槛失效，纯问答/只读诊断也会被催沉淀 ✗。现在读开关一律用
+`!== false`：**缺键 = 保持默认开启**，只有显式 `false` 才关。
+
+**改动**：
+
+- `export const Config = Schema.object({…})`（另保留 `schema` 旧名做别名，兼容既有测试与文档）；
+- 所有开关改读 `config.xxx !== false`：`autoRecall` / `preStepRouting` / `autoRetro` / `retroRequireCodeChange`；
+- 拆掉 0.6.2/0.6.3 的临时诊断埋点与对照组注册；
+- 新增两条配置契约护栏：① 必须导出 `Config`，且 `Config({})` 要填满默认值；
+  ② **拿 profile 那份 config（没有 `preStepRouting` 键）原样跑 `apply()`，必须照样注册注入** ——
+  这条正是能拦住本次事故的测试；
+- `docs/operations.md` 的"必踩坑"从两条升到三条，把导出名这条写进去。
+
+测试 223 → **224 通过**。
+
 ## 0.6.3 — 2026-09-18
 
 **定位到了：`agent/pre-step` 监听器被 Cordis 的 scope 过滤静默丢掉。**
