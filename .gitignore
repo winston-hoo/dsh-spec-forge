@@ -13,3 +13,8 @@ dev/
 coverage/
 test-out.txt
 test-err.txt
+
+# 插件自己的运行时数据目录（workspace 模式下就在仓库根）：模板库、档案、诊断埋点。
+# 跑测试时 boot() 会按默认模式写到这里——绝不入库。
+.dsh-spec-forge/
+prestep-trace.log
