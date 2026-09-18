@@ -3,6 +3,39 @@
 本插件锁定目标 dsh 版本：`@deepseek-ai/dsh` 0.1.x（developer preview，API 可能有破坏性变更）。
 兼容性以实际安装的 profile 依赖树为准。
 
+## 0.6.2 — 2026-09-18
+
+**诊断版：`agent/pre-step` 注入在真实会话里一次都没触发 —— 这一版用来把它钉死。**
+
+现象（真实观察，不是推断）：装进 profile → 重启 DSH → 发一条**必定触发**的消息
+（`直接做：只回我一句「OK」，别改任何文件`，用插件自己的函数在本机复算：`level:1`、`fastTrack:true`、
+notice 245 字符），会话日志里**仍然没有**任何 `{"kind":"plugin","plugin":"dsh-spec-forge","form":"notice"}`；
+而同格式的其他插件注入（runtime-context / user-approval / compact）都在 —— 说明日志确实记录这类消息。
+
+**已逐项排除**：
+
+| 假设 | 结论 |
+| --- | --- |
+| 没装好 | 否。profile 依赖 / `dsh.profile.bundles` / 锁文件 sha / 装进去的 `index.js`（含 `ctx.on('agent/pre-step')`）全部核对过 |
+| 配置把开关关了 | 否。`--dump-config` 显示该层无 `preStepRouting` 覆盖 → 取 schema 默认 `true` |
+| 注册方式不对 | 否。与内置 `dsh-tool-skill` / `dsh-repeat-tool-reminder` **逐行同构**（`await next()` → 改 `messages` 返回） |
+| 事件没在发 | 否。技能目录注入用的就是同一事件，本会话正常出现 |
+| 插件没被 apply | 否。运行中的进程里 `spec_triage` 可调用且返回正常 |
+| 消息形状不符 | 否。真实用户消息带 `role:"user"` + `source.kind:"user"`（38/38 条都有） |
+
+**这一版做两件事**：
+
+1. **修两处可疑点**（无论是否为根因都该修）：
+   - 判定池改为**优先读 `payload.messages`**（内置插件都读它），没有再退回 `decision.messages`；
+   - 兜底挑选**排除一切插件注入** —— 此前会把 runtime-context（`role:user`、且不含 `<system-reminder>`）
+     当成"用户需求"拿去分级，后果是**静默判定为非 L1 而不注入**。
+2. **加临时诊断埋点**：每次 pre-step 判定往 `<数据目录>/prestep-trace.log` 落一行 JSON，记录
+   `claimed/entering` 条数、挑中哪条、级别，以及走的是 `inject` / `no-requirement` / `empty-notice` /
+   `duplicate-skip` / `error` 哪条分支。**验证完即删**（连同它的测试）。
+
+另补两条**按真实发射端形状**的回归测试：mock 与真实形状不一致，正是这个问题能溜过 220 条测试的原因。
+测试 220 → **223 通过**。
+
 ## 0.6.1 — 2026-09-18
 
 **修一个"克隆下来装不上"的边角：`peerDependencies` 让仓库自己的 `pnpm install` 直接失败。**

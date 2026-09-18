@@ -12,7 +12,7 @@
 //   skills       —— 可选，用 ctx.get 探测
 
 import { createHash, randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -155,14 +155,44 @@ export function apply(ctx, config) {
   //   ② 只注入两种"最容易走错"的情形（见 renderPreStepNotice），triage 不注入，省 token；
   //   ③ 全程 try/catch + 幂等：任何异常都原样放行（返回下游 decision），绝不拖垮本轮。
   if (config.preStepRouting && typeof ctx.on === 'function') {
+    // 0.6.2（诊断版）：把每次 pre-step 调用的判定结果落一行 JSON，用来回答"到底哪一步没走到"。
+    // 这是临时埋点，验证完即删 —— 它不参与任何业务逻辑，失败也绝不影响本轮。
+    const traceFile = join(home, 'prestep-trace.log')
+    const trace = (entry) => {
+      try {
+        if (statSync(traceFile, { throwIfNoEntry: false })?.size > 256 * 1024) return
+        mkdirSync(home, { recursive: true })
+        appendFileSync(traceFile, `${JSON.stringify({ t: new Date().toISOString(), ...entry })}\n`)
+      } catch {
+        /* 诊断不拖垮主流程 */
+      }
+    }
     ctx.on('agent/pre-step', async (payload, next) => {
       const decision = await next()
       try {
-        if (!decision || decision.kind === 'reject') return decision
+        if (!decision || decision.kind === 'reject') {
+          trace({ event: 'passthrough-reject' })
+          return decision
+        }
         payload?.signal?.throwIfAborted?.()
-        const messages = Array.isArray(decision.messages) ? decision.messages : []
-        const requirement = pickRequirementMessage(messages)
-        if (!requirement) return decision
+        // 内置插件（dsh-tool-skill / dsh-repeat-tool-reminder）判定时读的都是 payload.messages；
+        // 0.6.2 起跟随它们：payload 里没有才退回 decision.messages。
+        const claimed = Array.isArray(payload?.messages) ? payload.messages : []
+        const entering = Array.isArray(decision.messages) ? decision.messages : []
+        const pool = claimed.length > 0 ? claimed : entering
+        const requirement = pickRequirementMessage(pool)
+        const shape = {
+          turn: payload?.turn,
+          step: payload?.step,
+          claimed: claimed.length,
+          entering: entering.length,
+          picked: requirement ? requirement.source?.kind ?? 'no-kind' : null,
+          pickedText: requirement ? messageTextOf(requirement).slice(0, 40) : null,
+        }
+        if (!requirement) {
+          trace({ ...shape, event: 'no-requirement' })
+          return decision
+        }
         const requirementText = messageTextOf(requirement)
         // ponytail: 幂等只按「需求原文哈希 + 轮次」判定，不做语义去重 —— 用户换句话复述同一需求
         // 会被当成新需求再注入一次（代价约 140 token）。上限：改写后重复注入；
@@ -170,21 +200,35 @@ export function apply(ctx, config) {
         const digest = shortDigest(requirementText)
         const turn = payload?.turn
         // 幂等：同一轮里同一条需求只注入一次（多 step / 会话重放同样安全）
-        const already = messages.some(
+        const already = [...claimed, ...entering].some(
           (m) =>
             m?.source?.plugin === PLUGIN_ID &&
             m?.source?.digest === digest &&
             (turn === undefined || m?.source?.turn === turn)
         )
-        if (already) return decision
+        if (already) {
+          trace({ ...shape, event: 'duplicate-skip' })
+          return decision
+        }
         const classification = classifyComplexity(requirementText)
         const notice = renderPreStepNotice(classification)
-        if (!notice) return decision
+        if (!notice) {
+          trace({ ...shape, event: 'empty-notice', level: classification.level, charLen: requirementText.length })
+          return decision
+        }
+        trace({
+          ...shape,
+          event: 'inject',
+          level: classification.level,
+          fastTrack: classification.fastTrack === true,
+          noticeChars: notice.length,
+        })
         return {
           ...decision,
-          messages: [...messages, createNoticeMessage(notice, { digest, turn, classification })],
+          messages: [...entering, createNoticeMessage(notice, { digest, turn, classification })],
         }
       } catch (err) {
+        trace({ event: 'error', message: String(err?.message ?? err) })
         ctx.logger?.warn?.(`[spec-forge] pre-step 注入失败，已忽略（本轮不受影响）: ${err.message}`)
         return decision
       }
@@ -722,15 +766,15 @@ function messageTextOf(message) {
 /**
  * 从本轮消息里挑出「用户原始需求」。
  * 优先 `source.kind === 'user'`（真实用户输入的标记，内置插件也用它判断）；
- * 拿不到时退回到最后一条"非插件注入、且不含 system-reminder"的用户角色消息。
+ * 拿不到时退回到"最后一条非插件注入、且不含 system-reminder"的用户角色消息 ——
+ * **必须排除插件注入**（runtime-context / 政策快照 / 技能目录都是 role=user 且不带
+ * system-reminder 的消息），否则会把"当前运行时上下文"当成用户需求拿去分级。
  */
 function pickRequirementMessage(messages) {
-  const candidates = [...messages]
-    .reverse()
-    .filter((m) => m?.role === 'user' && m?.source?.plugin !== PLUGIN_ID)
-  const real = candidates.find((m) => m?.source?.kind === 'user')
+  const users = messages.filter((m) => m?.role === 'user')
+  const real = users.find((m) => m?.source?.kind === 'user')
   if (real) return real
-  return candidates.find((m) => !/<system-reminder>/.test(messageTextOf(m))) ?? null
+  return users.find((m) => !m?.source?.plugin && !/<system-reminder>/.test(messageTextOf(m))) ?? null
 }
 
 function shortDigest(text) {

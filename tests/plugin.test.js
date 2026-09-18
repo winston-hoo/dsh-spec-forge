@@ -6,7 +6,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -217,6 +217,64 @@ test('pre-step：任何异常都原样放行，绝不拖垮本轮', async () => 
     },
   ])
   assert.equal(foreign.messages.length, 1, '别的插件的 system-reminder 不得被当成用户需求')
+})
+
+test('pre-step：按真实发射端形状驱动（payload.messages=claimed，decision 里另带 runtime-context）', async () => {
+  // 这条按 dsh-agent-loop 的真实调用形状构造：payload.messages = claimed（真实用户消息），
+  // decision.messages = [...claimed, context]（context 是 runtime-context 投影）。
+  // mock 与真实不一致，正是 0.6.1 之前"注入静默不发生"能溜过 220 条测试的原因。
+  const { handlers } = boot()
+  const claimed = [userMessage('直接做：只回我一句「OK」，别改任何文件')]
+  const runtimeContext = {
+    id: 'ctx-1',
+    role: 'user',
+    content: [{ type: 'text', text: 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.' }],
+    source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt', form: 'snapshot' },
+  }
+  const decision = await runPreStep(handlers, [...claimed, runtimeContext], {
+    payload: { messages: claimed, step: 1 },
+  })
+
+  const injected = decision.messages.filter((m) => m.source?.plugin === 'dsh-spec-forge')
+  assert.equal(injected.length, 1, `应当注入一条 spec-forge 提示，实际 ${injected.length}`)
+  assert.ok(injected[0].content[0].text.includes('L1'), '注入的应当是 L1 一步直达')
+  assert.equal(
+    decision.messages.filter((m) => m.source?.kind === 'user').length,
+    1,
+    '真实用户消息不得被吞掉'
+  )
+  assert.ok(
+    decision.messages.some((m) => m.source?.plugin === '@deepseek-ai/dsh-system-prompt'),
+    'runtime-context 不得被吞掉'
+  )
+})
+
+test('pre-step：没有真实用户消息时，绝不把 runtime-context 当成需求', async () => {
+  const { handlers } = boot()
+  const runtimeContext = {
+    id: 'ctx-2',
+    role: 'user',
+    content: [{ type: 'text', text: 'Current runtime context. This snapshot supersedes earlier runtime-context snapshots.' }],
+    source: { kind: 'plugin', plugin: '@deepseek-ai/dsh-system-prompt', form: 'snapshot' },
+  }
+  // 多步场景：此时 claimed 为空，池子里只有插件消息 → 必须一条都不注入
+  const decision = await runPreStep(handlers, [runtimeContext], { payload: { messages: [], step: 4 } })
+  assert.equal(decision.messages.filter((m) => m.source?.plugin === 'dsh-spec-forge').length, 0)
+})
+
+test('pre-step：诊断埋点会把每次判定落一行 JSON（0.6.2 临时，验证完随埋点一起删）', async () => {
+  const tmp = mkdtempSync(join(tmpdir(), 'spec-forge-trace-'))
+  try {
+    const home = join(tmp, 'sf')
+    const { handlers } = boot({ storageHome: home })
+    await runPreStep(handlers, [userMessage('直接做：改个文案')], { payload: { messages: [], step: 1 } })
+    const lines = readFileSync(join(home, 'prestep-trace.log'), 'utf8').trim().split('\n')
+    const entry = JSON.parse(lines[lines.length - 1])
+    assert.equal(entry.event, 'inject', `埋点应记录注入，实际 ${entry.event}`)
+    assert.ok(entry.noticeChars > 0, '应记录注入字符数')
+  } finally {
+    rmSync(tmp, { recursive: true, force: true })
+  }
 })
 
 test('pre-step：关掉开关后不再注册注入（完全回到常驻段方案）', () => {
