@@ -186,6 +186,7 @@ env -u NODE_OPTIONS pnpm update dsh-spec-forge
    schema 里声明的默认值。于是 `if (config.preStepRouting && …)` 这种写法会静默跳过整段逻辑
    （0.5.0～0.6.3 的注入从未注册过，线上却看不出任何异常）。
    两道防线：① 导出名用 `Config`；② 读开关一律写 `!== false`，让"缺键"等价于"默认开启"。
+   另有一道金丝雀（0.6.5）：`config.preStepRouting === undefined` 即判定"配置没走过 schema"并告警。
 3. **Profile 目录本身是 pnpm workspace 根目录**，在该目录直接 `add` 可能需要 `-w`。
 
 ### 卸载

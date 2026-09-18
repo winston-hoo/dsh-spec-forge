@@ -84,6 +84,17 @@ export const schema = Config
 const __dirname = dirname(fileURLToPath(import.meta.url))
 
 export function apply(ctx, config) {
+  // 金丝雀（0.6.5）：cordis 只在插件导出 `Config` 时才校验并填默认值（resolveConfig 第一行就是
+  // `if (!runtime.Config) return config;`）。因此"某个带默认值的键是 undefined"能精确指示
+  // **配置根本没走过 schema** —— 0.6.4 之前这类失效完全静默：默认值失效、开关为 undefined、
+  // 整段逻辑被跳过，而插件表面上一切正常（工具照样注册）。这里把它喊出来。
+  if (config?.preStepRouting === undefined) {
+    ctx.logger?.warn?.(
+      '[spec-forge] 配置未经过 schema 校验（缺少 preStepRouting 等默认值）：请确认插件导出的是 `Config` 而不是 `schema`。' +
+        '本次按 schema 默认值继续运行。'
+    )
+  }
+
   // 顶层确定 home：用户配置 > $DSH_HOME 兜底。process.cwd() 作为 workspace 模式的兜底，
   // 对 99% 用例（dsh 启动时的 cwd = 工作区）够用；session 级 cwd 由 resolveCwd 工具级处理。
   const resolvedStorage = resolveStorageRoot({

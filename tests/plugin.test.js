@@ -33,6 +33,7 @@ function fakeSession({ turnEndKind = 'completed', cwd = CWD } = {}) {
 function makeCtx() {
   const tools = new Map()
   const handlers = new Map()
+  const warnings = []
   const box = { section: null }
   const ctx = {
     tools: { register: (tool) => tools.set(tool.name, tool) },
@@ -42,14 +43,14 @@ function makeCtx() {
       list.push(fn)
       handlers.set(event, list)
     },
-    logger: { info: () => {}, warn: () => {} },
+    logger: { info: () => {}, warn: (msg) => warnings.push(String(msg)) },
   }
-  return { ctx, tools, handlers, box }
+  return { ctx, tools, handlers, box, warnings }
 }
 
 /** 启动一个插件实例，返回注册出来的工具表 + 捕获到的常驻提示段 + 事件处理器 */
 function boot(overrides = {}) {
-  const { ctx, tools, handlers, box } = makeCtx()
+  const { ctx, tools, handlers, box, warnings } = makeCtx()
   const config = {
     autoRecall: true,
     autoRetro: true,
@@ -66,14 +67,14 @@ function boot(overrides = {}) {
     ...overrides,
   }
   apply(ctx, config)
-  return { tools, section: box.section, handlers, config }
+  return { tools, section: box.section, handlers, config, warnings }
 }
 
 /** 原样把 config 喂给 apply（不过 schema）—— 复刻"profile patch 里少写了键"的真实处境 */
 function bootRaw(rawConfig) {
-  const { ctx, tools, handlers, box } = makeCtx()
+  const { ctx, tools, handlers, box, warnings } = makeCtx()
   apply(ctx, rawConfig)
-  return { tools, section: box.section, handlers, config: rawConfig }
+  return { tools, section: box.section, handlers, config: rawConfig, warnings }
 }
 
 const exec = (session) => ({ agent: { session } })
@@ -291,6 +292,22 @@ test('配置：必须导出 Config，空对象也要被填满默认值（否则 
   assert.equal(filled.retroRequireCodeChange, true, '缺键时必须默认要求"真改过代码"')
   assert.equal(filled.storageRoot, 'workspace')
   assert.equal(filled.matchThreshold, 0.35)
+})
+
+test('配置：未过 schema 的 config 必须发出金丝雀警告（静默失效到此为止）', () => {
+  const CANARY = '未经过 schema 校验'
+  // 缺键 = 没走过 schema（cordis 只在导出 Config 时校验）→ 必须喊出来
+  const raw = bootRaw({ autoRecall: true, autoRetro: true })
+  assert.ok(
+    raw.warnings.some((w) => w.includes(CANARY)),
+    '缺 preStepRouting 时必须发出金丝雀警告'
+  )
+  // 过了 schema 的配置不该告警
+  const validated = bootRaw(Config({}))
+  assert.equal(validated.warnings.filter((w) => w.includes(CANARY)).length, 0, '过 schema 的不该告警')
+  // 无论告不告警，注入都必须照常注册（fail-soft，但不能 fail-silent）
+  assert.equal((validated.handlers.get('agent/pre-step') ?? []).length, 1)
+  assert.equal((raw.handlers.get('agent/pre-step') ?? []).length, 1)
 })
 
 test('配置：profile 那份 config（没有 preStepRouting 键）也必须照常注入', async () => {
