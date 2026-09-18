@@ -21,7 +21,7 @@ import { homedir } from 'node:os'
 import { focusFingerprint, fingerprint, inferQueryTags } from '../lib/fingerprint.js'
 import { inferQueryCategory } from '../lib/classify.js'
 import { rankTemplates } from '../lib/match.js'
-import { triageRequirement, renderInjection, renderRoutingLines, renderTriageReport } from '../lib/render.js'
+import { triageRequirement, renderInjection, renderPreStepNotice, renderRoutingLines, renderTriageReport } from '../lib/render.js'
 import { listTemplates, repoHash, dataRoot } from '../lib/store.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -120,6 +120,14 @@ out.push(row('② 五个工具定义合计', toolsTotal, toolsToks, '随工具�
 const skillFile = join(repoRoot, 'skills', 'spec-forge', 'SKILL.md')
 const skillText = existsSync(skillFile) ? readFileSync(skillFile, 'utf8') : ''
 out.push(row('③ SKILL.md（按需加载一次）', skillText.length, estTokens(skillText), '模型调用 skill 工具时整篇进上下文'))
+
+// ---------- 3b. pre-step 注入（0.5.0，命中才计入） ----------
+// 常驻段是"每轮固定税"，这一层相反：只有判成 L1 一步直达 / 需求缺内容才注入，
+// triage 与普通对话为 0。所以这里量的是"命中时的单价"，不是每轮成本。
+const noticeFast = renderPreStepNotice({ level: 1, fastTrack: true, contentGap: [] })
+const noticeGap = renderPreStepNotice({ level: 2, fastTrack: false, contentGap: ['按钮的文案与用途'] })
+out.push(row('④ pre-step 注入：L1 一步直达', noticeFast.length, estTokens(noticeFast), '命中才计入；不命中为 0'))
+out.push(row('④ pre-step 注入：需求缺内容', noticeGap.length, estTokens(noticeGap), '命中才计入；不命中为 0'))
 
 // ---------- 4. 单次工具调用的典型输出 ----------
 const REQUIREMENTS = {

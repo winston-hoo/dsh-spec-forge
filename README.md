@@ -38,6 +38,10 @@
 
 所以「改一下文案」「调一下间距」一步直达，而「登录页加个按钮」会先问一次——加什么按钮、点了做什么，那是产品决策，替你挑一个就是猜。
 
+而且这个判定**不等模型读完工具返回值**：插件在请求发出前就用同一套判据算好，并以一条 `system-reminder` 直接注入
+（dsh 的 `agent/pre-step`，等价于 Claude Code 的 `UserPromptSubmit`）。命中 `implement`/`confirm` 时注入，
+`triage` 与普通对话不注入——**不该花的 token 一分不花**。关掉它用 `preStepRouting: false`。
+
 ### 2. 需求体检：四维完整度 + 保守默认
 
 `spec_triage` 检查四个维度（要实现什么 / 怎么改 / 哪些不能改 / 上下文），并给出可直接执行的报告：
@@ -144,7 +148,7 @@ pnpm dsh --profile web --dump-config | Select-String spec-forge
 
 ```yaml
 # 顶层数组；⚠️ id 定向补丁会「整体替换」该行 config，必须完整重述所有字段
-# 下面就是全部 11 个参数的默认值（tests/contract.test.js 会检查示例是否漏项）
+# 下面就是全部 12 个参数的默认值（tests/contract.test.js 会检查示例是否漏项）
 - id: spec-forge
   config:
     autoRecall: true
@@ -152,6 +156,7 @@ pnpm dsh --profile web --dump-config | Select-String spec-forge
     matchThreshold: 0.35
     maxInjectTemplates: 2
     injectMaxChars: 4000
+    preStepRouting: true
     defaultScope: project
     storageHome: ''
     storageRoot: workspace

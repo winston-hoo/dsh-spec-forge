@@ -113,3 +113,40 @@ test('契约：docs/operations.md 必须覆盖 schema 的全部配置键', () =>
     assert.ok(OPS.includes(key), `docs/operations.md 缺少配置项 ${key}`)
   }
 })
+
+test('契约：pre-step 注入与常驻段对同一态的口径必须一致', () => {
+  // 注入是把常驻段的"软约束"升级成"请求发出前的硬指令"，所以两者对同一态
+  // 的动作要求必须逐条对得上 —— 否则就会有两条互相矛盾的指令同时进上下文。
+  const implement = ROUTING_CONTRACT.find((r) => r.nextStep === 'implement')
+  const confirm = ROUTING_CONTRACT.find((r) => r.nextStep === 'confirm')
+
+  const fast = renderPreStepNotice({ level: 1, fastTrack: true, contentGap: [] })
+  assert.ok(fast.includes('spec_recall'), 'implement 注入必须保住"先召回"（模板与禁区都靠它）')
+  assert.ok(fast.includes('spec_triage') && fast.includes('spec_distill'), 'implement 注入必须明文禁止多走流程')
+  for (const banned of ['spec_triage', 'spec_distill']) {
+    assert.ok(
+      implement.action.some((line) => line.includes(banned)),
+      `常驻段 implement 态应当也禁止 ${banned}，注入与常驻段口径不一致`
+    )
+  }
+
+  const gap = renderPreStepNotice({ level: 2, fastTrack: false, contentGap: ['按钮的文案与用途'] })
+  assert.ok(gap.includes('ask_user_question'), 'confirm 注入必须要求先问')
+  assert.ok(gap.includes('按钮的文案与用途'), 'confirm 注入必须把缺的内容原样点名')
+  assert.ok(
+    confirm.action.some((line) => line.includes('ask_user_question')),
+    '常驻段 confirm 态应当也要求 ask_user_question'
+  )
+
+  // triage 不注入：常驻段已经写明"先 spec_recall → 再 spec_triage"，重复一遍只是重复计费
+  assert.equal(renderPreStepNotice({ level: 3, fastTrack: false, contentGap: [] }), '')
+  assert.equal(renderPreStepNotice(undefined), '', '拿不到判定结果时必须安静')
+})
+
+test('契约：README 与 operations.md 必须说明 pre-step 注入这一层', () => {
+  // 新增一层却不在文档里说清楚，是"能力偷偷上线"——0.4.7 的 SKILL.md 漂移就是同类问题
+  for (const [name, text] of [['README.md', README], ['docs/operations.md', OPS]]) {
+    assert.ok(text.includes('preStepRouting'), `${name} 必须提到 preStepRouting 开关`)
+  }
+  assert.ok(/pre-?step/i.test(README) || README.includes('preStepRouting'), 'README 必须说明注入时机')
+})

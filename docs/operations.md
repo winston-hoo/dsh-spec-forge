@@ -94,6 +94,7 @@ profile 的行配置**不是**写成一个 `spec-forge:` 缩进块，而是改�
 | `matchThreshold` | `0.35` | 命中阈值，低更易命中、高更严格 |
 | `maxInjectTemplates` | `2` | 单次最多注入几份模板 |
 | `injectMaxChars` | `4000` | 注入上下文上限字符数 |
+| `preStepRouting` | `true` | 每轮请求发出前按需求原文算出 `nextStep` 并以 `system-reminder` 注入（只注入 L1 一步直达 / 需求缺内容两态）。关闭后回退为"只靠常驻段与 `spec_recall` 返回值" |
 | `defaultScope` | `project` | 沉淀默认落项目层还是全局层 |
 | `retroMinToolCalls` | `2` | 自动复盘要求的最少工具调用数 |
 | `retroRequireCodeChange` | `true` | 沉淀提醒要求真实改过代码，纯问答/只读不提醒 |
@@ -103,7 +104,37 @@ profile 的行配置**不是**写成一个 `spec-forge:` 缩进块，而是改�
 
 ---
 
-## 三、排障
+## 三、请求前注入（preStepRouting，0.5.0）
+
+插件监听 dsh 的 `agent/pre-step` 瀑布事件（等价于 Claude Code 的 `UserPromptSubmit`）：在每个 step 的请求
+**发出之前**按需求原文算出 `nextStep`，命中下面两态时追加一条 `system-reminder` 用户消息：
+
+| 命中 | 注入内容 | 为什么值得花这份 token |
+| --- | --- | --- |
+| L1 一步直达 | "先调一次 `spec_recall` 拿模板与禁区，然后直接实现；不要调 `spec_triage`/`spec_distill`" | 实测 20 次真实召回里 17 次跟着调了 `spec_triage`——召回已经判过的结论，模型又走了一遍流程 |
+| 需求缺内容 | "缺少 X；先 `spec_recall`，再用一次 `ask_user_question` 问清 X" | 0.4.6 那次事故就是模型自己替用户挑了按钮用途 |
+
+- **`triage` 与普通对话不注入**：常驻段已写明"先 `spec_recall` → 再 `spec_triage`"，重复一遍只是重复计费。
+- **判据与 `spec_recall` 同源**（同一个 `classifyComplexity`、同一份需求原文），所以注入结论与随后召回的
+  结论不可能自相矛盾——这是它敢下硬指令的前提。
+- **幂等**：同一轮同一需求只注入一次；注入消息带 `source.digest` + `source.turn`，会话重放也安全。
+- **异常一律放行**：判定过程整体 `try/catch`，出错只写一条 warn，原样返回下游 decision，绝不拖垮本轮。
+
+### 它没生效怎么查
+
+```bash
+node scripts/verify-load.js   # 末段会打印四种真实需求的注入结果（含"不注入"的情形）
+```
+
+- 四种样本里只有两种注入，闲聊那条**必须**显示"不注入"，否则就是判定过宽。
+- 只看到"注册了 pre-step 注入 [PASS]"但真实会话里没有 → 先确认 dsh 版本支持 `agent/pre-step`
+  （`grep -r "agent/pre-step" <dsh 安装目录>/node_modules/@deepseek-ai/dsh-agent/lib/`），
+  再确认 `dump-config` 里 `preStepRouting` 没被 profile 补丁压成 `false`。
+- 注入消息在会话记录里长这样：`source.plugin = "dsh-spec-forge"`、`source.form = "notice"`。
+
+---
+
+## 四、排障
 
 ### 第一招永远是 dump-config
 
@@ -160,7 +191,7 @@ dsh web   # 重启生效
 
 ---
 
-## 四、验证
+## 五、验证
 
 ```bash
 npm test            # 单元测试：222 个（含契约护栏与 0.4.7 回归）
@@ -218,7 +249,7 @@ home 模式不得自己复制自己、`strictDistill` 关闭后警告必须消�
 
 ---
 
-## 五、开发与发布
+## 六、开发与发布
 
 变更记录见 [`CHANGELOG.md`](../CHANGELOG.md)。发布流程：
 
