@@ -11,6 +11,7 @@
 //   systemPrompt —— 可选，用 ctx.get 探测
 //   skills       —— 可选，用 ctx.get 探测
 
+import { createHash, randomUUID } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -47,6 +48,7 @@ import {
 import {
   SECTIONS,
   renderInjection,
+  renderPreStepNotice,
   renderRoutingLines,
   renderTemplateMarkdown,
   renderTriageReport,
@@ -65,6 +67,11 @@ export const schema = Schema.object({
   matchThreshold: Schema.number().min(0).max(1).default(0.35).description('模板命中阈值，0~1，越低越容易命中'),
   maxInjectTemplates: Schema.number().min(1).max(5).default(2).description('单次最多注入几份历史模板'),
   injectMaxChars: Schema.number().min(500).max(20000).default(4000).description('注入上下文的最大字符数'),
+  preStepRouting: Schema.boolean()
+    .default(true)
+    .description(
+      '每轮请求发出前，由插件按需求原文算出 nextStep 并以 system-reminder 注入（L1 一步直达 / 需求缺内容两种情形）。关闭后回退为"只靠常驻段与 spec_recall 返回值"'
+    ),
   defaultScope: Schema.union(['project', 'global']).default('project').description('沉淀默认落在项目层还是全局层'),
   storageHome: Schema.string().default('').description('自定义数据目录（绝对路径）。非空时优先于 storageRoot'),
   storageRoot: Schema.string().default('workspace').description('存储模式：workspace 跟当前工作目录（推荐，跨盘时避免 EPERM）/home 放 $DSH_HOME（兼容旧版默认）'),
@@ -140,7 +147,56 @@ export function apply(ctx, config) {
     }
   }
 
-  // ---------- 第 3 层：兜底提醒（模型漏调 spec_retro 时提示） ----------
+  // ---------- 第 3 层：pre-step 硬注入（0.5.0） ----------
+  //
+  // 为什么需要这一层：常驻段与 spec_recall 的返回值都是"模型先读到、再自觉执行"的软约束。
+  // 实测 20 次真实召回里有 17 次紧接着调了 spec_triage（一次简单改页面白跑两趟往返），
+  // 而 0.4.6 记录的那次会话则是模型自己替用户挑了按钮用途。
+  //
+  // dsh 提供 `agent/pre-step` 瀑布事件（等价于 Claude Code 的 UserPromptSubmit）：它在每个 step
+  // 的请求**发出之前**调用，返回值里的 messages 就是本轮进入模型的上下文。内置插件正是这么做的 ——
+  // dsh-tool-skill 用它注入 skill 目录，dsh-repeat-tool-reminder 用它手搓用户消息（createUserMessage）。
+  // 于是插件可以自己算好路由、作为一条 plugin 消息送进请求，而不必指望模型照做。
+  //
+  // 三条安全设计：
+  //   ① 判据与 spec_recall 同源（同一个 classifyComplexity、同一份需求原文）→ 结论不可能打架；
+  //   ② 只注入两种"最容易走错"的情形（见 renderPreStepNotice），triage 不注入，省 token；
+  //   ③ 全程 try/catch + 幂等：任何异常都原样放行（返回下游 decision），绝不拖垮本轮。
+  if (config.preStepRouting && typeof ctx.on === 'function') {
+    ctx.on('agent/pre-step', async (payload, next) => {
+      const decision = await next()
+      try {
+        if (!decision || decision.kind === 'reject') return decision
+        payload?.signal?.throwIfAborted?.()
+        const messages = Array.isArray(decision.messages) ? decision.messages : []
+        const requirement = pickRequirementMessage(messages)
+        if (!requirement) return decision
+        const requirementText = messageTextOf(requirement)
+        const digest = shortDigest(requirementText)
+        const turn = payload?.turn
+        // 幂等：同一轮里同一条需求只注入一次（多 step / 会话重放同样安全）
+        const already = messages.some(
+          (m) =>
+            m?.source?.plugin === PLUGIN_ID &&
+            m?.source?.digest === digest &&
+            (turn === undefined || m?.source?.turn === turn)
+        )
+        if (already) return decision
+        const classification = classifyComplexity(requirementText)
+        const notice = renderPreStepNotice(classification)
+        if (!notice) return decision
+        return {
+          ...decision,
+          messages: [...messages, createNoticeMessage(notice, { digest, turn, classification })],
+        }
+      } catch (err) {
+        ctx.logger?.warn?.(`[spec-forge] pre-step 注入失败，已忽略（本轮不受影响）: ${err.message}`)
+        return decision
+      }
+    })
+  }
+
+  // ---------- 第 4 层：兜底提醒（模型漏调 spec_retro 时提示） ----------
   // 注意：dsh 的 turn/end 事件载荷不含 session 事件流（data 只有 {turn, reason}），
   // 无法在此做沉淀门槛判定；旧版靠 turn.session/steps 的写法实际永远不触发。
   // 兜底已改到 spec_recall execute 内用 exec.agent.session 惰性判定（见 buildRecallNotice），
@@ -871,6 +927,57 @@ function buildRecallNotice(exec, state, config) {
     '跨项目成立 / 用户是否会反复提），有复用价值就先调用 `spec_retro` 沉淀成模板，' +
     '再开始本次需求；确无复用价值可忽略并继续。'
   )
+}
+
+/** 插件身份：注入消息的 source.plugin（字段约定同内置插件 dsh-repeat-tool-reminder） */
+const PLUGIN_ID = 'dsh-spec-forge'
+
+/** 取出消息的纯文本（content 可能是字符串、也可能是 [{type:'text',text}] 数组） */
+function messageTextOf(message) {
+  const content = message?.content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((part) => (typeof part === 'string' ? part : part?.type === 'text' ? (part.text ?? '') : ''))
+    .join('\n')
+}
+
+/**
+ * 从本轮消息里挑出「用户原始需求」。
+ * 优先 `source.kind === 'user'`（真实用户输入的标记，内置插件也用它判断）；
+ * 拿不到时退回到最后一条"非插件注入、且不含 system-reminder"的用户角色消息。
+ */
+function pickRequirementMessage(messages) {
+  const candidates = [...messages]
+    .reverse()
+    .filter((m) => m?.role === 'user' && m?.source?.plugin !== PLUGIN_ID)
+  const real = candidates.find((m) => m?.source?.kind === 'user')
+  if (real) return real
+  return candidates.find((m) => !/<system-reminder>/.test(messageTextOf(m))) ?? null
+}
+
+function shortDigest(text) {
+  return createHash('sha256').update(String(text ?? '').trim()).digest('hex').slice(0, 12)
+}
+
+/**
+ * 注入消息：与内置插件 `createUserMessage` 同形（稳定 id + 不可变内容）。
+ * source 里额外带上 `plugin` / `digest` / `turn`，供幂等判定与会话回放时去重。
+ */
+function createNoticeMessage(text, { digest, turn, classification }) {
+  return Object.freeze({
+    id: randomUUID(),
+    role: 'user',
+    content: Object.freeze([Object.freeze({ type: 'text', text })]),
+    source: Object.freeze({
+      kind: 'plugin',
+      plugin: PLUGIN_ID,
+      form: 'notice',
+      digest,
+      turn,
+      summary: classification?.fastTrack === true ? 'L1 一步直达' : '需求缺内容',
+    }),
+  })
 }
 
 export { extractSessionFacts, isSessionComplete, buildRetroDigest }

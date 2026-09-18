@@ -17,7 +17,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { L1_EXAMPLES } from '../lib/classify.js'
-import { ROUTING_CONTRACT, renderRoutingLines } from '../lib/render.js'
+import { ROUTING_CONTRACT, renderPreStepNotice, renderRoutingLines } from '../lib/render.js'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const read = (p) => readFileSync(join(ROOT, p), 'utf8')
