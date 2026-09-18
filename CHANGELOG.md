@@ -3,6 +3,31 @@
 本插件锁定目标 dsh 版本：`@deepseek-ai/dsh` 0.1.x（developer preview，API 可能有破坏性变更）。
 兼容性以实际安装的 profile 依赖树为准。
 
+## 0.6.1 — 2026-09-18
+
+**修一个"克隆下来装不上"的边角：`peerDependencies` 让仓库自己的 `pnpm install` 直接失败。**
+
+现象（用户实操复现）：
+
+```
+[ERR_PNPM_NO_MATCHING_VERSION] No matching version found for @deepseek-ai/dsh-tools@>=0.1.0
+while fetching it from https://registry.npmmirror.com/
+```
+
+根因：pnpm 8+ 默认 `auto-install-peers=true`，于是这三个 peer 被当成**要真去装的依赖**，而
+`@deepseek-ai/dsh-tools` 在公共镜像上最新只到 `0.0.1-rc.1`（`0.1.x` 只挂在 `alpha` / `next` 两个 tag 下），
+区间 `>=0.1.0` 无解。
+
+修复：加 `peerDependenciesMeta`（三个都 `optional: true`）。它们本来就**由宿主在运行时提供** ——
+插件只是 `import` 它们，从不自己安装；声明它们的价值是当文档，不是当依赖。
+
+| | 之前 | 之后 |
+| --- | --- | --- |
+| 装进 profile（`qbot-dsh plugin add …`） | 正常 | 正常（profile 的 `pnpm-workspace.yaml` 本来就有 `autoInstallPeers: false`，这条路从没炸过） |
+| 克隆仓库后 `pnpm install` | **ERR_PNPM_NO_MATCHING_VERSION** | 跳过可选 peer，正常结束 |
+
+只动 `package.json` 元数据，**零代码变化**：已装进 profile 的 0.6.0 不需要重装。
+
 ## 0.6.0 — 2026-09-18
 
 **把 ponytail 从"审计视角"真的用成"执行标准"：本轮是净删除。**
