@@ -3,6 +3,31 @@
 本插件锁定目标 dsh 版本：`@deepseek-ai/dsh` 0.1.x（developer preview，API 可能有破坏性变更）。
 兼容性以实际安装的 profile 依赖树为准。
 
+## 0.6.3 — 2026-09-18
+
+**定位到了：`agent/pre-step` 监听器被 Cordis 的 scope 过滤静默丢掉。**
+
+用**真 cordis + 真 dsh-scope** 在本地做了一次派发实验（以 `scopeTarget(agent, agent)` 当 thisArg，
+与 `dsh-agent-loop` 的真实调用一致），结果：
+
+| 注册方式 | 收到事件？ |
+| --- | --- |
+| 无 scope 标签的 ctx，不带选项 | ✅ 收到 |
+| 带"外来" scope 标签的 ctx，不带选项 | ❌ **静默收不到**（无异常、无日志） |
+| 带外来标签的 ctx + `{ global: true }` | ✅ 收到 |
+
+线上现象与第二行完全一致：`apply()` 确实跑到了监听器注册那一步（工具注册在它之后、却一切正常），
+监听器却一次都没被调用 —— 连 0.6.2 的埋点都没落盘。
+
+**这一版用"同 ctx 同 handler、只差选项"的方式注册两份**：
+
+- `global-ctx`：`ctx.on('agent/pre-step', handler, { global: true })` —— Cordis 的 dispatch 看到
+  `hook.global` 直接放行、绕过 scope 过滤；`dsh-scope` 自己的跨切面不变式监听器就是这么注册的。
+- `plain-ctx`：不带选项的对照组 —— 若两个落点都收到，说明另有其因，届时按埋点数据再收窄。
+
+任一落点触发都会在 `<数据目录>/prestep-trace.log` 落一行（含 label），同一轮仍只注入一次。
+真机验证通过后，埋点与对照组一并删除。
+
 ## 0.6.2 — 2026-09-18
 
 **诊断版：`agent/pre-step` 注入在真实会话里一次都没触发 —— 这一版用来把它钉死。**

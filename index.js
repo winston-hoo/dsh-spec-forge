@@ -167,11 +167,15 @@ export function apply(ctx, config) {
         /* 诊断不拖垮主流程 */
       }
     }
-    ctx.on('agent/pre-step', async (payload, next) => {
+    const seenKeys = new Set()
+    // 实验（0.6.3 诊断）：同一个 handler 注册到不同落点。Cordis 的事件过滤（dsh-scope 的
+    // scopeTarget）按监听器 ctx 的 scope 标签决定派发与否 —— profile 层加载的插件拿到的 ctx
+    // 若带了标签、且该标签不是该 agent 作用域的祖先，就永远收不到 agent 事件。
+    const makeHandler = (label) => async (payload, next) => {
       const decision = await next()
       try {
         if (!decision || decision.kind === 'reject') {
-          trace({ event: 'passthrough-reject' })
+          trace({ event: 'passthrough-reject', label })
           return decision
         }
         payload?.signal?.throwIfAborted?.()
@@ -182,10 +186,12 @@ export function apply(ctx, config) {
         const pool = claimed.length > 0 ? claimed : entering
         const requirement = pickRequirementMessage(pool)
         const shape = {
+          label,
           turn: payload?.turn,
           step: payload?.step,
           claimed: claimed.length,
           entering: entering.length,
+          roles: pool.map((m) => `${m?.role ?? '-'}:${m?.source?.kind ?? '-'}`).slice(0, 6),
           picked: requirement ? requirement.source?.kind ?? 'no-kind' : null,
           pickedText: requirement ? messageTextOf(requirement).slice(0, 40) : null,
         }
@@ -199,17 +205,21 @@ export function apply(ctx, config) {
         // 升级触发：真实会话里观察到这种重复噪声，再考虑按指纹相似度合并。
         const digest = shortDigest(requirementText)
         const turn = payload?.turn
-        // 幂等：同一轮里同一条需求只注入一次（多 step / 会话重放同样安全）
-        const already = [...claimed, ...entering].some(
-          (m) =>
-            m?.source?.plugin === PLUGIN_ID &&
-            m?.source?.digest === digest &&
-            (turn === undefined || m?.source?.turn === turn)
-        )
+        // 幂等：同一轮里同一条需求只注入一次（多 step / 会话重放 / 多落点注册同样安全）
+        const key = `${turn}:${digest}`
+        const already =
+          seenKeys.has(key) ||
+          [...claimed, ...entering].some(
+            (m) =>
+              m?.source?.plugin === PLUGIN_ID &&
+              m?.source?.digest === digest &&
+              (turn === undefined || m?.source?.turn === turn)
+          )
         if (already) {
           trace({ ...shape, event: 'duplicate-skip' })
           return decision
         }
+        seenKeys.add(key)
         const classification = classifyComplexity(requirementText)
         const notice = renderPreStepNotice(classification)
         if (!notice) {
@@ -228,10 +238,39 @@ export function apply(ctx, config) {
           messages: [...entering, createNoticeMessage(notice, { digest, turn, classification })],
         }
       } catch (err) {
-        trace({ event: 'error', message: String(err?.message ?? err) })
+        trace({ event: 'error', label, message: String(err?.message ?? err) })
         ctx.logger?.warn?.(`[spec-forge] pre-step 注入失败，已忽略（本轮不受影响）: ${err.message}`)
         return decision
       }
+    }
+    // 落点/选项实验：同一个 ctx、同一个 handler，只差注册选项。
+    //   global-ctx —— 带 { global: true }：Cordis 的 dispatch 见 hook.global 就直接放行，绕过 scope 过滤
+    //                 （dsh-scope 自己的跨切面不变式监听器就是这么注册的）。
+    //   plain-ctx  —— 不带选项的对照组：它若收到、global 没收到，说明过滤方向与我预期相反。
+    // 谁收到就写谁的 label；两条都收到也不会重复注入（seenKeys 兜底）。
+    const targets = [
+      ['global-ctx', ctx, { global: true }],
+      ['plain-ctx', ctx, undefined],
+    ]
+    for (const [label, target, options] of targets) {
+      if (options === undefined) target.on('agent/pre-step', makeHandler(label))
+      else target.on('agent/pre-step', makeHandler(label), options)
+    }
+    let hooks = []
+    try {
+      hooks = (ctx.events?._hooks?.['agent/pre-step'] ?? []).map((h) => ({
+        name: h?.ctx?.name ?? null,
+        self: h?.ctx === ctx,
+        global: h?.global === true,
+      }))
+    } catch {
+      /* 内部结构变了就跳过，别拖垮加载 */
+    }
+    trace({
+      event: 'boot',
+      registeredOn: targets.map(([label]) => label),
+      hookCount: hooks.length,
+      hooks,
     })
   }
 
