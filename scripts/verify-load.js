@@ -5,7 +5,7 @@
 
 import { apply } from '../index.js'
 
-const TOOL_NAMES = ['spec_recall', 'spec_triage', 'spec_distill', 'spec_retro', 'spec_library']
+const TOOL_NAMES = ['spec_recall', 'spec_triage', 'spec_distill', 'spec_retro']
 
 const registered = []
 const handlers = new Map()
@@ -48,7 +48,7 @@ try {
   apply(ctx, config)
 
   check('apply 不抛错', true)
-  check('注册了 5 个工具', registered.length === 5, `实际 ${registered.length}`)
+  check('注册了 4 个工具', registered.length === 4, `实际 ${registered.length}`)
 
   for (const name of TOOL_NAMES) {
     const tool = registered.find((t) => t && t.name === name)

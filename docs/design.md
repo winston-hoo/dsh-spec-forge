@@ -163,7 +163,7 @@ unactionable = tooShort && missing.length >= 2 && !hasAnchor
 
 ---
 
-## 四、五个工具
+## 四、四个工具
 
 | 工具 | 什么时候被调用 | 干什么 |
 | --- | --- | --- |
@@ -171,9 +171,11 @@ unactionable = tooShort && missing.length >= 2 && !hasAnchor
 | `spec_triage` | `nextStep=triage` 时 | 四维体检 + 定 L1/L2/L3。L1 出执行清单，L2 出「已按默认执行」，L3 出完整 Grill-me。不重复扫模板库，也不接收 `cwd` |
 | `spec_distill` | L3 与安全阀场景澄清完毕、动手之前 | 把需求 + 澄清答案 + 禁区蒸馏成一份实现提示词；禁区为空会拦下 |
 | `spec_retro` | 任务收尾 | 把这次经验沉淀/更新成模板；digest 留空时自动从会话事件流提取摘要 |
-| `spec_library` | 用户问"模板库里有什么""放哪""怎么搬过来" | `action: list` 展示数据目录/模板清单/命中统计/项目禁区/过期模板；`action: info` 查看存储模式、路径与跨盘判定；`action: migrate` 迁移旧库 |
 
-`spec_store` 已被并入 `spec_library`（`action: info / migrate`），工具数从 6 降到 5，省下约 480 token/请求的常驻工具定义成本。
+0.3.3 的 `spec_store` 曾被并入 `spec_library`；**0.6.0 把 `spec_library` 整个删掉了**（工具数 5 → 4）。
+依据：15 个真实会话里它被调用 **0 次**，却占 481 token/请求；而它承担的"看模板库 / 跨路径搬数据 /
+清过期模板"三件事，根子上都是**文件系统自带能力** —— 模板库就是一堆带 frontmatter 的 markdown，
+看一眼、拷一份、删一个文件都不需要插件代码。
 
 ---
 
@@ -184,7 +186,7 @@ unactionable = tooShort && missing.length >= 2 && !hasAnchor
 | 常驻 | 系统提示词 section | 由 `lib/render.js` 的 `ROUTING_CONTRACT` 渲染：三态路由 + 提问白名单 + 大文件纪律 + 沉淀门槛 | 约 489 token，始终占用（0.4.7 起内容与代码同源） |
 | **每轮** | `agent/pre-step` 注入（0.5.0） | 按本轮需求原文现算的 `nextStep` 硬指令，只命中 L1 一步直达 / 需求缺内容两态；`triage` 与普通对话不注入 | 命中 136（L1）/ 150（缺内容）token，不命中 0（`npm run token-audit` 实测） |
 | 按需 | 运行时 Skill | 完整流程说明书（含三层漏斗决策与大文件纪律） | 用到才加载 |
-| 执行 | 五个工具 | 上一节的表 | 调用才产生 |
+| 执行 | 四个工具 | 上一节的表 | 调用才产生 |
 
 > **为什么要有"每轮"这一层**：常驻段与工具返回值都是"模型先读到、再自觉执行"的软约束。
 > 真实会话里 20 次召回有 17 次紧接着调了 `spec_triage`（召回已经判过的结论，模型又走一遍流程）；
@@ -209,7 +211,7 @@ unactionable = tooShort && missing.length >= 2 && !hasAnchor
 
 | 项 | 量级 | 说明 |
 | --- | --- | --- |
-| 插件固定税 | ≈ 3.2K token / 请求 | 常驻提示段 ≈ 489 + 五个工具定义 ≈ 2740（0.4.7 实测） |
+| 插件固定税 | ≈ 2.7K token / 请求 | 常驻提示段 ≈ 489 + 四个工具定义 ≈ 2237（0.6.0 实测） |
 | 插件单次调用产出 | 几百 token | `spec_recall` 未命中仅 43 token；`spec_triage` 报告 350~530 token |
 | 插件占整轮成本 | ≈ 4% | 8 次 `spec_*` 调用，返回 14.5K 字符，占全部工具返回的 3.2% |
 | **真正的成本大头** | **≈ 50%** | 两个 >100K 字符的文件被**整读**后，在其后约 73 步里被反复重计 |

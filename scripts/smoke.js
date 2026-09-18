@@ -69,8 +69,6 @@ try {
   writeProfile(home, scope, {
     repoName: 'example-admin',
     redlines: ['不要修改 common/Result.java 的返回结构'],
-    conventions: ['Controller 层不写业务逻辑'],
-    notes: '',
   })
 
   const stored = listTemplates(home, scope)

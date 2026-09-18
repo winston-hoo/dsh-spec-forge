@@ -133,17 +133,6 @@ test('工具层：上一轮没有正常结束时不得催沉淀（sessionComplet
   assert.ok(completed.notice, '已改码且正常结束的会话应当出现沉淀提醒')
 })
 
-test('工具层：home 模式没有"旧路径"，迁移不得自己复制自己', async () => {
-  const { tools } = boot({ storageRoot: 'home' })
-  const info = await tools.get('spec_library').execute({ action: 'info', cwd: CWD }, exec(fakeSession()))
-  assert.ok(info.report.includes('与数据目录是同一个目录'), `实际报告：\n${info.report}`)
-  assert.equal(info.legacy.hasData, false, '同路径时不应把现用库统计成旧路径数据')
-
-  const migrated = await tools.get('spec_library').execute({ action: 'migrate', cwd: CWD }, exec(fakeSession()))
-  assert.equal(migrated.migration, undefined, '同路径时不应执行任何复制')
-  assert.ok(migrated.report.includes('没有独立旧路径'), `实际报告：\n${migrated.report}`)
-})
-
 test('工具层：strictDistill 真的生效——未声明禁区时警告可见且可关闭', async () => {
   const distill = boot().tools.get('spec_distill')
   const on = await distill.execute({ requirement: '给订单模块加导出' })

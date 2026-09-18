@@ -87,9 +87,9 @@ out.push(
   ),
 )
 
-// ---------- 2. 五个工具的 defineTool 定义（近似序列化体量） ----------
+// ---------- 2. 各工具的 defineTool 定义（近似序列化体量） ----------
 const toolBlocks = {}
-const names = ['spec_recall', 'spec_triage', 'spec_distill', 'spec_retro', 'spec_library']
+const names = ['spec_recall', 'spec_triage', 'spec_distill', 'spec_retro']
 for (let i = 0; i < names.length; i++) {
   const name = names[i]
   const start = indexSrc.indexOf(`name: '${name}'`)
@@ -112,9 +112,9 @@ for (const name of names) {
   const t = toolBlocks[name] ?? ''
   toolsTotal += t.length
   toolsToks += estTokens(t)
-  out.push(row(`② 工具定义 ${name}`, t.length, estTokens(t), '每轮请求都带（5 个合计见下）'))
+  out.push(row(`② 工具定义 ${name}`, t.length, estTokens(t), `每轮请求都带（${names.length} 个合计见下）`))
 }
-out.push(row('② 五个工具定义合计', toolsTotal, toolsToks, '随工具列表每轮注入，含字段描述'))
+out.push(row(`② ${names.length} 个工具定义合计`, toolsTotal, toolsToks, '随工具列表每轮注入，含字段描述'))
 
 // ---------- 3. SKILL.md（按需加载） ----------
 const skillFile = join(repoRoot, 'skills', 'spec-forge', 'SKILL.md')
@@ -133,7 +133,7 @@ out.push(row('④ pre-step 注入：需求缺内容', noticeGap.length, estToken
 const REQUIREMENTS = {
   L1字段需求: 'index.vue 这个后台管理页面的新增/修改接口增加一个主管人员字段 isMainAdmin，值为1是，0否，默认为否，这个字段用开关来显示，请帮我完成这个需求',
   模糊需求: '帮我优化一下那个查询',
-  purgeStale开发: '在 dsh-spec-forge 的 lib/store.js 里新增一个 purgeStale 方法，清理超过 90 天未使用的模板，不要改 listTemplates 的返回结构，需要 npm test 通过',
+  新增store方法: '在 dsh-spec-forge 的 lib/store.js 里新增一个 staleReport 方法，列出超过 90 天未命中的模板，不要改 listTemplates 的返回结构，需要 npm test 通过',
 }
 out.push('')
 out.push('### 4. 单次工具调用产出的文本（插件发给模型的增量）')

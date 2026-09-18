@@ -12,7 +12,7 @@
 //   skills       —— 可选，用 ctx.get 探测
 
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -25,22 +25,14 @@ import { rankTemplates } from './lib/match.js'
 import { buildRetroDigest, evaluateRetroEligibility, extractSessionFacts, isSessionComplete } from './lib/extract.js'
 import {
   bulletLines,
-  bumpWriteEpoch,
   collectRedlines,
-  copyTree,
-  dataRoot,
   dedupeRedlines,
-  describeStore,
-  isCrossDrive,
   liftLegacyNesting,
   listTemplates,
-  purgeStale,
   readProfile,
   recordHit,
   repoHash,
-  resolveHome,
   resolveStorageRoot,
-  staleTemplates,
   templateId,
   writeProfile,
   writeTemplate,
@@ -172,6 +164,9 @@ export function apply(ctx, config) {
         const requirement = pickRequirementMessage(messages)
         if (!requirement) return decision
         const requirementText = messageTextOf(requirement)
+        // ponytail: 幂等只按「需求原文哈希 + 轮次」判定，不做语义去重 —— 用户换句话复述同一需求
+        // 会被当成新需求再注入一次（代价约 140 token）。上限：改写后重复注入；
+        // 升级触发：真实会话里观察到这种重复噪声，再考虑按指纹相似度合并。
         const digest = shortDigest(requirementText)
         const turn = payload?.turn
         // 幂等：同一轮里同一条需求只注入一次（多 step / 会话重放同样安全）
@@ -618,8 +613,6 @@ export function apply(ctx, config) {
             writeProfile(home, hash, {
               repoName: profile.repoName || cwd,
               redlines: dedupeRedlines([...profile.redlines, ...(args.redlines ?? [])]),
-              conventions: profile.conventions,
-              notes: profile.notes,
             })
           } catch (err) {
             ctx.logger?.warn?.(`[spec-forge] 禁区写入项目档案失败: ${err.message}`)
@@ -657,228 +650,12 @@ export function apply(ctx, config) {
     })
   )
 
-  // ---------- 工具 5：模板库状态 ----------
-
-  ctx.tools.register(
-    defineTool({
-      name: 'spec_library',
-      description:
-        '模板库管理。action=list：列模板清单/命中统计/项目禁区/过期模板（用户问「模板库里有什么」时用；purge=true 才物理删除）。action=info：查看存储模式、数据目录、跨盘状态与旧路径数据量。action=migrate：把旧 $DSH_HOME/spec-forge 复制到当前数据目录（move=true 删源）。',
-      parameters: {
-        action: {
-          type: 'string',
-          description: "'list'（默认）模板清单 | 'info' 存储路径与模式 | 'migrate' 迁移旧数据",
-        },
-        cwd: { type: 'string', description: '当前工作目录绝对路径' },
-        purge: {
-          type: 'boolean',
-          description:
-            'list 时是否物理删除过期模板（>90 天未命中）。默认 false 只统计；必须用户明确表达「清理/删除过期模板」才传 true，删除不可恢复。',
-        },
-        move: {
-          type: 'boolean',
-          description: 'migrate 时是否删除源文件，默认 false（复制保留源）',
-        },
-      },
-      output: {
-        schema: {
-          type: 'object',
-          additionalProperties: true,
-          properties: {
-            report: { type: 'string', required: true },
-            total: { type: 'number' },
-            removed: { type: 'number' },
-            action: { type: 'string' },
-            mode: { type: 'string' },
-            storagePath: { type: 'string' },
-            crossDrive: { type: 'boolean' },
-            legacy: { type: 'object', additionalProperties: true },
-            migration: { type: 'object', additionalProperties: true },
-          },
-        },
-        render: (_args, value) => [{ type: 'text', text: value.report }],
-      },
-      async execute(args, exec) {
-        const action = args.action || 'list'
-        const cwd = resolveCwd(args.cwd, exec)
-
-        // 0.4.0：原 spec_store 的能力并入本工具，避免多一个常驻工具定义
-        if (action === 'info' || action === 'migrate') {
-          return runStoreAction(action, {
-            cwd,
-            move: args.move === true,
-            home,
-            storageMode,
-            logger: ctx.logger,
-          })
-        }
-
-        const scope = repoHash(cwd)
-
-        let removed = 0
-        if (args.purge === true) {
-          removed = purgeStale(home, scope, 90)
-        }
-        const stale = staleTemplates(home, scope)
-        const info = describeStore(home, scope)
-        const templates = listTemplates(home, scope)
-
-        const lines = []
-        lines.push('## 提示词模板库')
-        lines.push('')
-        lines.push(`- 数据目录：\`${info.home}\``)
-        lines.push(`- 当前仓库哈希：\`${info.repoHash}\``)
-        lines.push(`- 模板总数：${info.total}（项目层 ${info.projectCount}，全局层 ${info.globalCount}）`)
-        lines.push('')
-
-        if (templates.length > 0) {
-          lines.push('| 模板 | 分类 | 层级 | 命中次数 | 最近使用 |')
-          lines.push('| --- | --- | --- | --- | --- |')
-          for (const t of templates.sort((a, b) => (b.hitCount ?? 0) - (a.hitCount ?? 0))) {
-            lines.push(
-              `| ${t.name} | \`${t.category}\` | ${t.scope === 'global' ? '全局' : '项目'} | ${t.hitCount ?? 0} | ${t.lastUsed ? String(t.lastUsed).slice(0, 10) : '—'} |`
-            )
-          }
-          lines.push('')
-        } else {
-          lines.push('模板库还是空的。完成第一个任务后调用 `spec_retro` 即可沉淀。')
-          lines.push('')
-        }
-
-        if (removed > 0) {
-          lines.push(`已按用户要求清理 ${removed} 个过期模板（≥90 天未使用）。`)
-          lines.push('')
-        } else if (stale.length > 0) {
-          lines.push(`### 过期模板（≥90 天未使用，${stale.length} 个）`)
-          lines.push('')
-          lines.push('这些模板长期未被召回命中。模板库不是越堆越好——过期模板会稀释检索精度。')
-          lines.push('如需删除请在对话中明确说「清理过期模板」，会物理删除且不可恢复。')
-          lines.push('')
-          for (const t of stale) {
-            const last = t.lastUsed || t.updated || t.created || ''
-            lines.push(
-              `- ${t.name}（${t.scope === 'global' ? '全局' : '项目'}，最近使用 ${String(last).slice(0, 10) || '未知'}）`
-            )
-          }
-          lines.push('')
-        }
-
-        if (info.profile.redlines.length > 0) {
-          lines.push('### 项目禁区（长期生效）')
-          lines.push('')
-          for (const r of info.profile.redlines) lines.push(`- ${r}`)
-        }
-
-        return { report: lines.join('\n'), total: info.total, removed, action: 'list' }
-      },
-    })
-  )
-
   ctx.logger?.info?.(
     `[spec-forge] 已加载，存储模式 ${storageMode}，数据目录 ${home}`
   )
 }
 
 // ---------- 辅助函数 ----------
-
-/**
- * spec_library 的 info / migrate 分支（0.4.0 由原 spec_store 工具并入，减少一个常驻工具定义）。
- */
-function runStoreAction(action, { cwd, move, home, storageMode, logger }) {
-  const legacyPath = dataRoot(resolveHome())
-  // 0.4.7：`home` 模式下数据目录本身就是 `$DSH_HOME/spec-forge`，"旧路径"与当前数据目录是
-  // 同一个目录。原实现照旧扫描、照旧 `copyTree(src, src)`（把目录复制进自己），
-  // migrate 还会执行 bumpWriteEpoch() —— 一次"什么都没做"的迁移却让模板缓存整体失效。
-  // 实测：resolveStorageRoot({storageRoot:'home'}).path === dataRoot(resolveHome()) 为 true。
-  const sameAsLegacy = normalizePath(legacyPath) === normalizePath(home)
-  const crossDrive = !sameAsLegacy && isCrossDrive(cwd, legacyPath)
-  const projectHash = repoHash(cwd)
-
-  const legacy = { hasData: false, projectCount: 0, globalCount: 0, projectHash }
-  if (!sameAsLegacy) {
-    try {
-      const srcProj = join(legacyPath, 'projects', projectHash)
-      const srcGlobal = join(legacyPath, 'global')
-      if (existsSync(srcProj)) legacy.projectCount = listTemplates(legacyPath, projectHash).length
-      if (existsSync(srcGlobal)) legacy.globalCount = listTemplates(legacyPath, 'global').length
-      legacy.hasData = legacy.projectCount + legacy.globalCount > 0
-    } catch (err) {
-      logger?.warn?.(`[spec-forge] 旧路径扫描失败: ${err.message}`)
-    }
-  }
-
-  let migration
-  if (action === 'migrate' && !sameAsLegacy) {
-    const ops = []
-    const srcGlobal = join(legacyPath, 'global')
-    const srcProj = join(legacyPath, 'projects', projectHash)
-    if (existsSync(srcGlobal)) ops.push(copyTree(srcGlobal, join(home, 'global'), move))
-    if (existsSync(srcProj)) ops.push(copyTree(srcProj, join(home, 'projects', projectHash), move))
-    migration = {
-      copied: ops.reduce((n, o) => n + o.copied, 0),
-      skipped: ops.reduce((n, o) => n + o.skipped, 0),
-      report: ops.map((o) => o.report).filter(Boolean).join('\n') || '(无文件复制)',
-    }
-    bumpWriteEpoch()
-  }
-
-  const lines = ['## 模板库存储', '']
-  lines.push(`- 模式：\`${storageMode}\``)
-  lines.push(`- 数据目录：\`${home}\``)
-  lines.push(`- 当前工作目录：\`${cwd}\``)
-  lines.push(
-    sameAsLegacy
-      ? `- 旧路径（$DSH_HOME/spec-forge）：与数据目录是同一个目录（home 模式），不存在独立旧路径`
-      : `- 旧路径（$DSH_HOME/spec-forge）：\`${legacyPath}\``
-  )
-  lines.push(`- 当前项目哈希：\`${projectHash}\``)
-  if (crossDrive) lines.push('- ⚠️ 检测到跨盘（cwd 与 $DSH_HOME 不同盘）。workspace 模式已规避跨盘写。')
-  lines.push('')
-  lines.push('### 旧路径数据概览')
-  lines.push('')
-  if (sameAsLegacy) {
-    lines.push('- 不适用：当前数据目录就是旧路径')
-  } else if (legacy.hasData) {
-    lines.push(`- 全局层模板：${legacy.globalCount}`)
-    lines.push(`- 当前项目层模板：${legacy.projectCount}`)
-  } else {
-    lines.push('- 旧路径无数据（global/ 或 projects/<hash> 不存在或为空）')
-  }
-  lines.push('')
-  if (sameAsLegacy) {
-    lines.push('存储模式为 `home` 时，数据目录即 `$DSH_HOME/spec-forge`，没有独立旧路径可迁移。')
-  } else if (migration) {
-    lines.push('### 迁移结果')
-    lines.push('')
-    lines.push(`- 复制：${migration.copied} 个文件；跳过（目标已存在）：${migration.skipped} 个`)
-    lines.push('')
-    lines.push('```')
-    lines.push(migration.report)
-    lines.push('```')
-  } else if (action === 'migrate') {
-    lines.push('未发现可迁移的旧数据，迁移执行了 0 次拷贝。')
-  } else {
-    lines.push('迁移用 `spec_library({ action: "migrate" })`：默认复制保留源，确认后再传 `move: true` 删源。')
-  }
-
-  return {
-    report: lines.join('\n'),
-    action,
-    mode: storageMode,
-    storagePath: home,
-    crossDrive,
-    legacy,
-    migration,
-  }
-}
-
-/** 路径比较用归一化：Windows 大小写不敏感 + 去掉结尾分隔符（用于判断"旧路径"是否就是当前目录） */
-function normalizePath(p) {
-  return String(p ?? '')
-    .replace(/[\\/]+$/, '')
-    .replace(/\//g, '\\')
-    .toLowerCase()
-}
 
 function resolveCwd(explicit, exec) {
   return explicit || exec?.agent?.session?.cwd || exec?.agent?.cwd || process.cwd()

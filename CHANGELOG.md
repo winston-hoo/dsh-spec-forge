@@ -3,6 +3,69 @@
 本插件锁定目标 dsh 版本：`@deepseek-ai/dsh` 0.1.x（developer preview，API 可能有破坏性变更）。
 兼容性以实际安装的 profile 依赖树为准。
 
+## 0.6.0 — 2026-09-18
+
+**把 ponytail 从"审计视角"真的用成"执行标准"：本轮是净删除。**
+
+触发是用户的一句追问：「你现在是按照 ponytail 给我重构了插件吗？验证了没」。
+诚实的回答是"没有完全按，而且最关键的一环没验证过" —— 于是这一版按 ponytail 的七级阶梯重新走了一遍，
+并把此前漏掉的三条补上（删除优先、`ponytail:` 标记、不做未请求的抽象）。
+
+### 删掉的东西（每一条都有数据依据，不是"看着没用"）
+
+| 删掉的 | 依据 |
+| --- | --- |
+| **`spec_library` 整个工具**（list / info / migrate 三个动作） | 15 个真实会话里被调用 **0 次**，却占 **481 token/请求** |
+| **`runStoreAction` + `copyTree` + `isCrossDrive`**（迁移机械） | 迁移＝复制一个普通 markdown 目录，**文件系统自带**（ponytail 阶梯第 3/4 级）；真实库只有 7 份模板 |
+| **`purgeStale` + `staleTemplates` + `usedDateOf`** | ">90 天没命中就删"是纯推测需求；真要删，删掉那个 `.md` 即可 |
+| **`describeStore`** | 唯一消费者就是被删的 `spec_library` |
+| **档案的「约定」「备注」两节** | 6 份真实 `profile.md` 里这两节全是 `（暂无）` 占位符，且**没有任何读取路径**（既不注入上下文也不进报告） |
+
+合计 **−489 行**（+17 / −506）：`index.js` 984 → 768、`lib/store.js` 748 → 620、`tests/store.test.js` −129。
+**这是本插件第一个净删除的版本。**
+
+做法上吸取了 0.4.7 的教训：切除用锚点断言完成（起点锚点必须唯一 + 切除范围必须含预期符号，否则不写盘），
+而不是"读一遍觉得对就删"。
+
+### 收益（`npm run token-audit` 实测）
+
+| 项 | 0.5.0 | 0.6.0 |
+| --- | --- | --- |
+| 工具数 | 5 | **4** |
+| 工具定义 | 2740 token | **2237** |
+| **固定税/请求** | 3229 token | **2726（−15.6%）** |
+| 测试 | 230 | 220（删掉的 10 条全是被删对象的测试） |
+
+### 刻意没删的（以及为什么）
+
+- **`spec_distill`**：真实调用 5 次而不是 0 —— 缺替代路径的证据就不删。
+- **`liftLegacyNesting`**：它是**启动时自动**修的布局事故（历史模板曾全部读不到），不是可选功能。
+- **`ROUTING_CONTRACT`**：这是我自己引入的抽象、只有一个渲染消费者，**本该被质疑**；保留的理由是它让
+  常驻段 / 文档 / 测试同源，而 0.4.7 的 SKILL.md 漂移正是"多处手写"造成的。现在它带 `ponytail:` 注释写明上限。
+
+### 补上 ponytail 明确要求、此前漏掉的三条
+
+1. **`ponytail:` 标记（6 处）** —— `classify.js` 关键词判据 / `fingerprint.js` 不接 embedding /
+   `match.js` 词面打分 / `extract.js` 事件流提取 / pre-step 幂等按原文哈希 / 档案只写禁区一节。
+   每条都写"上限 + 升级触发条件"，而不只是"为什么这么做"。
+2. **删除优先** —— 见上表。
+3. **护栏跟着工具面走** —— 契约护栏从「SKILL.md + README」扩展到 `docs/*.md`：删 `spec_library` 时，
+   文档里正留着"调 `spec_library({ action: 'info' })` 看路径"这种**指着一扇已封的门**的说明，
+   而旧护栏扫不到 `docs/`。
+
+### 补记 0.5.0 的验证状态（仍未闭环，别当成已验证）
+
+0.5.0 的 `agent/pre-step` 注入**仍未在真实会话里跑过**（装插件与重启都需要审批，本会话审批已关闭）。
+这一版补的是**源码级契约核实**，逐条对照通过：
+
+- `dsh-tool-cordis` 的权威签名：`payload = { agent, messages, turn, step, signal }`（`agent` 由 dsh-scope 注入）
+- `PreStepDecision = { kind:'reject' } | { kind:'enter'; messages: UserMessage[] }`
+- `dsh-agent-loop.preStep()`：默认实现即 `{ kind:'enter', messages: claimed }`，**`decision.messages` 就是进模型的上下文**
+- `MessageId` 是恒等函数（"no validation is performed"）→ 自造消息与官方 `createUserMessage` 等价
+- 已安装运行时里另有 **14 个插件**在用同一个事件
+
+**这仍然是推断，不是观察。** 要看它真的生效，需要装一次 ≥0.5.0 并跑一条真实需求。
+
 ## 0.5.0 — 2026-09-18
 
 **新增一层：在请求发出之前，由插件自己把本轮路由算好并注入。**

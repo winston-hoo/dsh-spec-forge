@@ -28,7 +28,7 @@ const OPS = read('docs/operations.md')
 const INDEX = read('index.js')
 
 /** 已知工具清单：新增/删除工具时同步这里，护栏会检查别处没引用不存在的工具 */
-const TOOL_NAMES = ['spec_recall', 'spec_triage', 'spec_distill', 'spec_retro', 'spec_library']
+const TOOL_NAMES = ['spec_recall', 'spec_triage', 'spec_distill', 'spec_retro']
 
 /** 从 index.js 的 schema 定义里扫出全部配置键（配置的唯一事实来源） */
 function schemaKeys() {
@@ -88,10 +88,27 @@ test('契约：常驻段不得再把容器型改动写成 L1 直通', () => {
   )
 })
 
-test('契约：SKILL.md 与 README 引用的 spec_* 工具都必须存在', () => {
-  for (const [name, text] of [['SKILL.md', SKILL], ['README.md', README]]) {
+test('契约：SKILL.md / README / docs 引用的 spec_* 工具都必须存在（或明确标注为已退役）', () => {
+  // 0.6.0 扩展到 docs/*.md：删掉 spec_library 时，design.md 与 operations.md 里
+  // 还留着「调 spec_library({action:'info'}) 看路径」这种**指着一扇已封的门**的说明，
+  // 而旧护栏只扫 SKILL.md 与 README，扫不到 docs/。
+  //
+  // 已退役的工具名可以出现在文档里，但必须与退役标记同行（讲历史/讲迁移），
+  // 不能像现行能力那样叫人去调 —— 否则就是 0.4.7 那类漂移的翻版。
+  const RETIRE_MARKER = /退役|已删|删除|并入|不再|旧版|0\.\d/
+  const RETIRED = ['spec_store', 'spec_library']
+  const DOCS = ['design.md', 'operations.md'].map((f) => [f, read(`docs/${f}`)])
+
+  for (const [name, text] of [['SKILL.md', SKILL], ['README.md', README], ...DOCS]) {
     for (const ref of new Set(text.match(/spec_[a-z]+/g) ?? [])) {
-      assert.ok(TOOL_NAMES.includes(ref), `${name} 引用了不存在的工具 ${ref}`)
+      if (TOOL_NAMES.includes(ref)) continue
+      assert.ok(RETIRED.includes(ref), `${name} 引用了不存在的工具 ${ref}`)
+      // 按**段落**判定而不是按行：文档里的软换行会把「0.6.0 删掉了 …」和工具名切到两行，
+      // 按行判定会把正常的说明误判成漂移（护栏第一次跑就是这么假阳性的）。
+      for (const para of text.split(/\n\s*\n/)) {
+        if (!para.includes(ref)) continue
+        assert.match(para, RETIRE_MARKER, `${name} 把已退役的 ${ref} 写成了现行做法：${para.trim().slice(0, 120)}`)
+      }
     }
   }
 })

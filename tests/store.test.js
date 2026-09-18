@@ -11,23 +11,19 @@ import {
   assertSafeId,
   bumpWriteEpoch,
   collectRedlines,
-  copyTree,
   dataRoot,
   dedupeRedlines,
-  isCrossDrive,
   liftLegacyNesting,
   listTemplates,
   parseFrontmatter,
   parseProfile,
   parseSimpleYaml,
-  purgeStale,
   readProfile,
   readTemplate,
   recordHit,
   repoHash,
   resolveHome,
   resolveStorageRoot,
-  staleTemplates,
   stringifyFrontmatter,
   templateId,
   templatePath,
@@ -193,109 +189,35 @@ test('writeProfile + readProfile：项目禁区持久化', () => {
   writeProfile(tmpHome, 'abc123', {
     repoName: 'example-admin',
     redlines: ['不要改 common/Result.java', '不要动 MybatisPlusConfig'],
-    conventions: ['Controller 不写业务逻辑'],
-    notes: 'ISO 申报期间勿改公共模块',
   })
 
   const profile = readProfile(tmpHome, 'abc123')
   assert.equal(profile.repoName, 'example-admin')
   assert.deepEqual(profile.redlines, ['不要改 common/Result.java', '不要动 MybatisPlusConfig'])
-  assert.deepEqual(profile.conventions, ['Controller 不写业务逻辑'])
-  assert.ok(profile.notes.includes('ISO'))
 })
 
 test('readProfile：未初始化时返回空结构而非报错', () => {
   const profile = readProfile(tmpHome, 'never-used')
   assert.deepEqual(profile.redlines, [])
-  assert.deepEqual(profile.conventions, [])
 })
 
-test('parseProfile：空占位被正确忽略', () => {
+test('parseProfile：空占位被忽略；0.6.0 起「约定」「备注」不再解析', () => {
   const parsed = parseProfile('---\nrepoName: demo\n---\n\n## 禁区\n\n- （暂无）\n\n## 约定\n\n- 用 4 空格缩进\n')
   assert.deepEqual(parsed.redlines, [])
-  assert.deepEqual(parsed.conventions, ['用 4 空格缩进'])
+  assert.equal(
+    parsed.conventions,
+    undefined,
+    '「约定」已删除：历史文件里的内容不再被解析（它从来没进过模型上下文）'
+  )
 })
 
 test('collectRedlines：合并项目档案与命中模板的禁区并去重', () => {
-  writeProfile(tmpHome, 'abc123', { repoName: 'demo', redlines: ['不要改 A'], conventions: [], notes: '' })
+  writeProfile(tmpHome, 'abc123', { repoName: 'demo', redlines: ['不要改 A'] })
   const id = templateId('z', 'abc123')
   writeTemplate(tmpHome, 'abc123', id, { name: 'z' }, '## 禁区\n\n- 不要改 B\n- 不要改 A\n')
 
   const redlines = collectRedlines(tmpHome, 'abc123', [readTemplate(tmpHome, 'abc123', id)])
   assert.deepEqual(redlines, ['不要改 A', '不要改 B'], '重复项应被去掉')
-})
-
-/** 生成 n 天前（UTC 日期粒度）的日期串，避免毫秒级边界抖动 */
-function dateNDaysAgo(n) {
-  const d = new Date()
-  d.setUTCDate(d.getUTCDate() - n)
-  return d.toISOString().slice(0, 10)
-}
-
-test('purgeStale：清理超过 90 天未使用的模板并返回数量', () => {
-  const fresh = writeTemplate(tmpHome, 'abc123', templateId('新鲜模板', 'abc123'), { name: '新鲜模板', lastUsed: dateNDaysAgo(1) }, 'body')
-  writeTemplate(tmpHome, 'abc123', templateId('过期甲', 'abc123'), { name: '过期甲', lastUsed: dateNDaysAgo(95) }, 'body')
-  writeTemplate(tmpHome, 'abc123', templateId('过期乙', 'abc123'), { name: '过期乙', lastUsed: dateNDaysAgo(200) }, 'body')
-
-  assert.equal(purgeStale(tmpHome, 'abc123'), 2)
-
-  const left = listTemplates(tmpHome, 'abc123')
-  assert.equal(left.length, 1)
-  assert.equal(left[0].id, fresh.id)
-})
-
-test('purgeStale：90 天边界——恰好 90 天保留、超过才删', () => {
-  writeTemplate(tmpHome, 'abc123', templateId('整90', 'abc123'), { name: '整90', lastUsed: dateNDaysAgo(90) }, 'body')
-  writeTemplate(tmpHome, 'abc123', templateId('超90', 'abc123'), { name: '超90', lastUsed: dateNDaysAgo(91) }, 'body')
-
-  assert.equal(purgeStale(tmpHome, 'abc123'), 1)
-  const left = listTemplates(tmpHome, 'abc123')
-  assert.equal(left.length, 1)
-  assert.equal(left[0].name, '整90')
-})
-
-test('purgeStale：days 参数可覆盖默认阈值', () => {
-  writeTemplate(tmpHome, 'abc123', templateId('近七天', 'abc123'), { name: '近七天', lastUsed: dateNDaysAgo(3) }, 'body')
-  writeTemplate(tmpHome, 'abc123', templateId('老十天', 'abc123'), { name: '老十天', lastUsed: dateNDaysAgo(10) }, 'body')
-
-  assert.equal(purgeStale(tmpHome, 'abc123', 7), 1)
-  assert.equal(listTemplates(tmpHome, 'abc123')[0].name, '近七天')
-})
-
-test('purgeStale：仓库视角下全局层超期模板一并清理', () => {
-  writeTemplate(tmpHome, 'global', templateId('全局过期', 'global'), { name: '全局过期', lastUsed: dateNDaysAgo(300) }, 'body')
-  writeTemplate(tmpHome, 'abc123', templateId('项目新鲜', 'abc123'), { name: '项目新鲜', lastUsed: dateNDaysAgo(2) }, 'body')
-
-  assert.equal(purgeStale(tmpHome, 'abc123'), 1)
-  assert.equal(listTemplates(tmpHome, null).length, 0, '全局层超期模板应被删除')
-  assert.equal(listTemplates(tmpHome, 'abc123').length, 1)
-})
-
-test('purgeStale：时间判定回退 updated，无任何时间字段的模板保留', () => {
-  // 手工落盘：仅带旧 updated 的模板应被清理（回退链第二环）
-  const viaUpdated = templateId('老updated', 'abc123')
-  writeFileSync(templatePath(tmpHome, 'abc123', viaUpdated), stringifyFrontmatter({ id: viaUpdated, name: '老updated', updated: dateNDaysAgo(120) }, 'body'))
-  // 完全无时间字段的模板：保守保留，不误删
-  const noDates = templateId('无日期', 'abc123')
-  writeFileSync(templatePath(tmpHome, 'abc123', noDates), stringifyFrontmatter({ id: noDates, name: '无日期' }, 'body'))
-
-  assert.equal(purgeStale(tmpHome, 'abc123'), 1)
-  const left = listTemplates(tmpHome, 'abc123')
-  assert.equal(left.length, 1)
-  assert.equal(left[0].id, noDates)
-})
-
-test('staleTemplates：只统计不删除，返回可精确定位的过期模板', () => {
-  writeTemplate(tmpHome, 'abc123', templateId('近的', 'abc123'), { name: '近的', lastUsed: dateNDaysAgo(5) }, 'body')
-  const oldId = templateId('老的', 'abc123')
-  writeTemplate(tmpHome, 'abc123', oldId, { name: '老的', lastUsed: dateNDaysAgo(95) }, 'body')
-
-  const stale = staleTemplates(tmpHome, 'abc123')
-  assert.equal(stale.length, 1)
-  assert.equal(stale[0].name, '老的')
-  assert.ok(stale[0].file, '应带 file 路径供后续精确删除')
-  assert.ok(existsSync(templatePath(tmpHome, 'abc123', oldId)), '统计不应删除文件')
-  assert.equal(listTemplates(tmpHome, 'abc123').length, 2)
 })
 
 test('listTemplates 读缓存：写盘后再次列出立即可见新模板（写版本号失效）', () => {
@@ -376,43 +298,6 @@ test('resolveStorageRoot：空字符串 storageRoot 视为默认 workspace', () 
 
 test('STORAGE_MODES：仅 workspace 与 home 两种关键字', () => {
   assert.deepEqual([...STORAGE_MODES], ['workspace', 'home'])
-})
-
-test('isCrossDrive：同盘返回 false；POSIX 永远返回 false', () => {
-  if (process.platform === 'win32') {
-    assert.equal(isCrossDrive('C:/a', 'C:/b'), false)
-    assert.equal(isCrossDrive('C:/a', 'D:/a'), true)
-  }
-  assert.equal(isCrossDrive('/a', '/b'), false)
-})
-
-test('copyTree：递归复制且同名文件跳过不覆盖', () => {
-  const src = mkdtempSync(join(tmpdir(), 'cp-src-'))
-  const dst = mkdtempSync(join(tmpdir(), 'cp-dst-'))
-  mkdirSync(join(src, 'sub'))
-  writeFileSync(join(src, 'a.md'), 'from-src')
-  writeFileSync(join(src, 'sub', 'b.md'), 'nested')
-  writeFileSync(join(dst, 'a.md'), 'preexisting')
-
-  const result = copyTree(src, dst, false)
-  assert.equal(result.copied, 1, 'sub/b.md 复制；a.md 跳过')
-  assert.equal(result.skipped, 1)
-  assert.equal(readFileContent(join(dst, 'a.md')), 'preexisting', '跳过模式下目标不被覆盖')
-  assert.equal(readFileContent(join(dst, 'sub', 'b.md')), 'nested')
-
-  rmSync(src, { recursive: true, force: true })
-  rmSync(dst, { recursive: true, force: true })
-})
-
-test('copyTree：move 模式成功后删除源文件', () => {
-  const src = mkdtempSync(join(tmpdir(), 'mv-src-'))
-  const dst = mkdtempSync(join(tmpdir(), 'mv-dst-'))
-  writeFileSync(join(src, 'x.md'), 'move me')
-  const r = copyTree(src, dst, true)
-  assert.equal(r.copied, 1)
-  assert.equal(existsSync(join(src, 'x.md')), false, '源文件已被删除')
-  rmSync(src, { recursive: true, force: true })
-  rmSync(dst, { recursive: true, force: true })
 })
 
 test('bumpWriteEpoch：返回值递增', () => {
