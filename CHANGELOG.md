@@ -3,6 +3,90 @@
 本插件锁定目标 dsh 版本：`@deepseek-ai/dsh` 0.1.x（developer preview，API 可能有破坏性变更）。
 兼容性以实际安装的 profile 依赖树为准。
 
+## 0.4.7 — 2026-09-18
+
+**本次不加功能：修已坏的、删多余的、补上让它们不会再坏的护栏。**
+
+起因是一次外部视角审计（用 ponytail 的 YAGNI 阶梯过一遍代码），并**改用真实会话数据做判据** ——
+把本机 15 个真实会话、11944 个事件逐帧解压（dsh 的会话日志是多帧 zstd，Node 单次解压只出第一帧），
+统计 `spec_*` 的真实调用：
+
+| 工具 | 真实调用 | 常驻税/请求 |
+| --- | --- | --- |
+| `spec_recall` | 20 | 568 |
+| `spec_triage` | 19 | 405 |
+| `spec_retro` | 15 | 778 |
+| `spec_distill` | 5 | 313 |
+| `spec_library` | **0** | 481 |
+
+三条读数：
+
+1. **「先召回」这条常驻指令是有效的**：5 个真正改过代码的会话，5 个都调了 `spec_recall`（激活率 100%）。
+   常驻段不是白花的。
+2. **「别多走流程」基本无效**：20 次召回里 17 次紧接着就调 `spec_triage` —— 但绝大多数样本落在 0.4.3
+   之前，`confirm` 三态与 fastTrack 在真实会话里**几乎没有样本**（只有 2 次召回发生在 0.4.3 之后）。
+3. **`spec_library` 从未被真实调用过**，而它占 481 token/请求。本轮**不删**（`migrate` 是升级路径的一部分），
+   留给下一轮用真实数据裁决。
+
+### 一、四处手写的契约，已经漂移（本次最严重的问题）
+
+`nextStep` 三态原先手写在四处：常驻系统提示段、5 个工具描述、`skills/spec-forge/SKILL.md`、`docs/*.md`。
+`docs/operations.md` 把「改契约必须同步四处」写成了流程要求 —— 而 SKILL.md 实际上漏了：
+
+| SKILL.md（模型真正读的） | 代码（0.4.6 的修复） |
+| --- | --- |
+| `:69 / :85 / :174` 把「**加按钮 / 加列 / 加路由**」写成 L1 直通信号 | 容器型原子改动缺内容 → `confirm`，**必须先问一次** |
+
+也就是说：**0.4.6 花一整版修好的 `confirm`，在模型读的说明书里被反向撤销，而当时 204 条测试全绿**
+（`tests/routing.test.js` 只护常驻段，不读 SKILL.md）。
+
+修法是把重复的那份**消掉**，而不是再加一个校验：
+`lib/render.js` 新增 `ROUTING_CONTRACT` + `renderRoutingLines()`，常驻段由它渲染（不再是手写副本），
+`tests/contract.test.js` 对着同一张表校验 SKILL.md 与文档。要改路由，只改这一处 + SKILL.md，两边不一致就会失败。
+
+### 二、修掉的真实缺陷（每条都有回归测试）
+
+| # | 缺陷 | 后果 | 位置 |
+| --- | --- | --- | --- |
+| 1 | 验收标准每次覆盖更新多叠一层 `- [ ] [ ] x` | 模板越沉淀越脏 | `index.js` / `render.js` / `store.js` 三份条目提取实现都不剥复选框前缀 |
+| 2 | ddl 正则裸写 `加列` | 「表格增加列宽自适应」这类**样式**需求被判 L3（完整 Grill-me + 提问前禁止读文件，代价最高） | `lib/classify.js` |
+| 3 | 写盘失败仍 `state.retroDone.add()` | 兜底提醒**永久失效**，而返回值却说"下次重试" | `index.js` spec_retro |
+| 4 | `sessionComplete` 从未接线（恒为默认 `true`） | 「上一轮已完成」这条门槛从未被评估，任务做一半也催沉淀 | `index.js` buildRecallNotice |
+| 5 | `strictDistill` 的「空则报错」是空承诺 | `missingConstraints` 模型根本看不到，SKILL.md 却叫它据此补问；且关掉开关警告照旧 | `index.js` spec_distill |
+| 6 | home 模式下「旧路径」就是当前数据目录 | `info` 把现用库报成旧路径；`migrate` 把目录复制进自己并 `bumpWriteEpoch()` | `index.js` runStoreAction |
+| 7 | `readTemplate` / `readProfile` 裸 `readFileSync` | 一个损坏/被占用/手工命名的文件就让**整次召回**失败（实测：写盘失败本该 `saved:false`，结果异常直接穿出工具边界） | `lib/store.js` |
+| 8 | `profilePath` 里 `ensureDir` | **读操作有写副作用**，数据目录不可写时抛 ENOTDIR 穿透工具 | `lib/store.js` |
+| 9 | 渲染层两处与权威表相反 | L1 徽标写死「组件/默认值明确」（原子小改路径也这么写）；L2 报告写「列表展示默认展示」，而 `L1_DEFAULTS.listDisplay` 是「不展示」 | `lib/render.js` |
+| 10 | `hash !== 'global'` 恒真、`buildPreview` 不可达 | 看着在防护，什么也没挡；一段永不执行的代码 | `index.js` |
+
+第 7、8 条是**新写的工具层测试当场挖出来的**（`tests/plugin.test.js`）—— 也就是说这一层此前不是"缺覆盖率"，是真的没测过。
+
+### 三、删掉的死物（零行为变化）
+
+- `renderTriageReport` 的 `templateHints` 死参数及其两处永不执行的分支（唯一构造方从不传）
+- 三份「条目提取」实现合一为 `store.bulletLines()`（这正是缺陷 1 的根因）
+- 死导出：`SECTION_ORDER`、`L2_MAX_QUESTIONS`、`sep` 的转发导出
+- 恒真守卫 `hash !== 'global'`、不可达的 `buildPreview`
+
+### 四、成本与护栏
+
+- 常驻提示段 **813 字符 ≈ 489 token**（0.4.6 为 823 ≈ 501）：改由契约渲染后**更短**，内容等价。
+  五个工具定义 ≈ 2740 token，固定税合计 ≈ 3229 token/请求（`npm run token-audit` 实测）。
+  `token-audit.js` 的提取逻辑同步改成"按顺序重组 + 展开契约渲染"，否则它会漏掉契约里的三态路由
+  （实测会把这 813 字符量成 238 token）。
+- 测试 **204 → 222**：新增 `tests/contract.test.js`（契约一致性）、`tests/plugin.test.js`（工具层）、
+  `tests/regression.test.js`（上述缺陷的触发条件）。契约护栏上线即抓到 README 配置示例只剩 2 个键的回归。
+
+### 五、本轮明确未动（留给下一轮，需要数据或更高风险）
+
+- **`spec_library` 与 `spec_distill` 的去留**：真实调用 0 次 / 5 次，但没有替代路径的证据，不凭一次审计删。
+- **平台级注入**：dsh 已提供 `agent/pre-step`（≈ UserPromptSubmit，可在本轮请求前注入消息）与
+  `tools/post-execute`（`additionalContexts`）。把路由指令从"常驻喊话"改成"硬注入"，才是
+  敢大幅削常驻段的前提 —— 需要先解决加载与回退路径。
+- **布局迁移机械**（`liftLegacyNesting` / `copyTree` / `isCrossDrive` / `migrate`）：为一次历史布局 bug 保留，
+  但用户真实数据仍在旧路径上，删除有风险。
+- 档案里 `conventions` / `notes` 两个字段**写了不读**（既不注入也不展示）：接线还是删除，需要产品决策。
+
 ## 0.4.6 — 2026-09-14
 
 **用户质疑：「登录页加个按钮」这个需求没写清加什么按钮、要做什么，直接让它通过开始编写是不是有问题。**

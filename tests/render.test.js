@@ -104,18 +104,9 @@ test('renderTriageReport：L2 需求齐全时按默认执行、不出现追问�
 test('renderTriageReport：L2 不再附带历史模板提示（避免与分类器推断值重复）', () => {
   const r = triageRequirement('在 UserController.java 帮我做一下用户列表的导出优化，需要支持 Excel 和 CSV')
   assert.equal(r.classification.level, 2)
-  const report = renderTriageReport(r, { templateHints: ['分页参数是 pageNum/pageSize 还是 offset/limit？'] })
+  const report = renderTriageReport(r)
   assert.ok(report.includes('Level 2'), '必须标注 Level 2')
   assert.ok(!report.includes('历史模板建议追加确认'), 'L2 不再附带历史模板提示')
-})
-
-test('renderTriageReport：L3 仍可附带历史模板的追加确认项', () => {
-  const r = triageRequirement('需要重构整个订单服务，涉及建表和跨文件迁移')
-  assert.equal(r.classification.level, 3, '必须判定为 Level 3')
-  const report = renderTriageReport(r, { templateHints: ['分页参数是 pageNum/pageSize 还是 offset/limit？'] })
-  assert.ok(report.includes('Level 3'), '必须标注 Level 3')
-  assert.ok(report.includes('历史模板建议追加确认'))
-  assert.ok(report.includes('pageNum/pageSize'))
 })
 
 test('renderTriageReport：Level 1 快速通道——单字段 CRUD 输出"执行清单"且无追问', () => {

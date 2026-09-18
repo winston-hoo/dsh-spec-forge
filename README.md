@@ -82,7 +82,7 @@ L1/L2 背后有一张**保守默认表**兜底：列表默认不展示新列、�
 ### 6. 成本控制：少往返 + 大文件纪律
 
 - **少往返** —— 简单需求从 3 次工具往返降到 1 次。用真实模板库回放 7 条样本，合计调用 22 → 14 次（−36%），简单需求全部 3 → 1 次（−67%）
-- **常驻开销透明** —— 常驻提示段约 501 token，五个工具定义约 2545 token，只出现在发往模型的完整请求里
+- **常驻开销透明** —— 常驻提示段约 489 token，五个工具定义约 2740 token，只出现在发往模型的完整请求里（`npm run token-audit` 实测）
 - **真正的成本大头是整读大文件** —— 一次实测里，两个 >100K 字符的文件被整读后，在其后约 73 步被反复重计，占整轮约 50%。所以「大文件纪律」写进了常驻提示与 Skill：`>20K` 字符的文件禁止整读，先 `grep` 定位再分段读；确需整读先落要点摘要
 
 完整成本归因见 [`docs/design.md`](docs/design.md)。
@@ -144,10 +144,20 @@ pnpm dsh --profile web --dump-config | Select-String spec-forge
 
 ```yaml
 # 顶层数组；⚠️ id 定向补丁会「整体替换」该行 config，必须完整重述所有字段
+# 下面就是全部 11 个参数的默认值（tests/contract.test.js 会检查示例是否漏项）
 - id: spec-forge
   config:
+    autoRecall: true
+    autoRetro: true
     matchThreshold: 0.35
+    maxInjectTemplates: 2
+    injectMaxChars: 4000
+    defaultScope: project
+    storageHome: ''
     storageRoot: workspace
+    retroMinToolCalls: 2
+    retroRequireCodeChange: true
+    strictDistill: true
 ```
 
 **参数全表、写法细节与坑见 [`docs/operations.md`](docs/operations.md#二配置改-cordispatchyml)。**

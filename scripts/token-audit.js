@@ -21,7 +21,7 @@ import { homedir } from 'node:os'
 import { focusFingerprint, fingerprint, inferQueryTags } from '../lib/fingerprint.js'
 import { inferQueryCategory } from '../lib/classify.js'
 import { rankTemplates } from '../lib/match.js'
-import { triageRequirement, renderInjection, renderTriageReport } from '../lib/render.js'
+import { triageRequirement, renderInjection, renderRoutingLines, renderTriageReport } from '../lib/render.js'
 import { listTemplates, repoHash, dataRoot } from '../lib/store.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -47,13 +47,27 @@ out.push(row('项目', '字符数', '估算tokens', '说明'))
 out.push(row('---', '---', '---', '---'))
 
 // ---------- 1. 常驻系统提示词段 ----------
+// 0.4.7：三态路由改由 lib/render.js 的 ROUTING_CONTRACT 渲染，源码里不再有那几行字面量。
+// 旧的"只抓单引号字面量"做法会把它们整段漏掉（实测把 823 字符量成 238 token）。
+// 这里按出现顺序重组：字面量照抄，遇到 `...renderRoutingLines()` 就展开契约的真实输出。
 const indexSrc = readFileSync(join(repoRoot, 'index.js'), 'utf8')
 const sysMatch = /name: 'spec-forge:routing'[\s\S]*?text: \[([\s\S]*?)\]\.join\('\\n'\)/.exec(indexSrc)
 let sysText = ''
 if (sysMatch) {
-  const lines = [...sysMatch[1].matchAll(/'((?:[^'\\]|\\.)*)'/g)].map((m) => m[1])
-  sysText = lines.join('\n')
+  const parts = []
+  for (const rawLine of sysMatch[1].split('\n')) {
+    const line = rawLine.trim()
+    if (line.startsWith('//') || !line) continue
+    if (line.startsWith('...renderRoutingLines()')) {
+      parts.push(...renderRoutingLines())
+      continue
+    }
+    const literal = /^'((?:[^'\\]|\\.)*)',?$/.exec(line)
+    if (literal) parts.push(literal[1])
+  }
+  sysText = parts.join('\n')
 }
+if (!sysText) throw new Error('未能测量常驻提示段（token-audit 的提取逻辑需要跟着 index.js 更新）')
 const sysToks = estTokens(sysText)
 // SYS_BUDGET 是**参考线，不是硬限制**（0.4.4 明确）：
 // dsh 的 renderPrompt 只把两侧 sections 按 order 排序后 join('\n\n')，

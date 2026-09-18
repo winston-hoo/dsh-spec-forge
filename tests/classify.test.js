@@ -5,7 +5,6 @@ import {
   ELEMENT_COMPONENT_FOR_TYPE,
   FIELD_COMPONENT_HINTS,
   L1_DEFAULTS,
-  L2_MAX_QUESTIONS,
   SKIP_TRIGGERS,
   classifyComplexity,
   extractDefaultValue,
@@ -158,8 +157,8 @@ test('L1_DEFAULTS：包含三类保守默认（列表展示/校验/后端）', (
   assert.ok(typeof L1_DEFAULTS.backend === 'string')
 })
 
-test('L2_MAX_QUESTIONS：默认为 3', () => {
-  assert.equal(L2_MAX_QUESTIONS, 3)
+test('L1_DEFAULTS：列表默认必须是"不展示"（0.4.7 修：L2 报告曾写死相反的"默认展示"）', () => {
+  assert.ok(L1_DEFAULTS.listDisplay.startsWith('不展示'), `实际: ${L1_DEFAULTS.listDisplay}`)
 })
 // ---------- 查询侧类别推断（0.3.1） ----------
 

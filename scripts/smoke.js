@@ -5,7 +5,7 @@
 
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 
 import { fingerprint } from '../lib/fingerprint.js'
 import { rankTemplates } from '../lib/match.js'
@@ -15,7 +15,6 @@ import {
   listTemplates,
   recordHit,
   repoHash,
-  sep,
   templateId,
   writeProfile,
   writeTemplate,

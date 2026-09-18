@@ -97,7 +97,7 @@ profile 的行配置**不是**写成一个 `spec-forge:` 缩进块，而是改�
 | `defaultScope` | `project` | 沉淀默认落项目层还是全局层 |
 | `retroMinToolCalls` | `2` | 自动复盘要求的最少工具调用数 |
 | `retroRequireCodeChange` | `true` | 沉淀提醒要求真实改过代码，纯问答/只读不提醒 |
-| `strictDistill` | `true` | 提炼时强制要求禁区，空则报错 |
+| `strictDistill` | `true` | 提炼时若未声明禁区：在提示词里插入警告、并回传 `missingConstraints=true`（0.4.7 起该字段在渲染文本里可见，模型据此先补问；关闭后不再警告） |
 | `storageRoot` | `workspace` | 存储模式：`workspace`（跟工作区）/ `home`（放 `$DSH_HOME`）；设置 `storageHome` 绝对路径时此字段被忽略 |
 | `storageHome` | 空 | 自定义数据目录（绝对路径）。非空时优先于 `storageRoot` |
 
@@ -163,15 +163,18 @@ dsh web   # 重启生效
 ## 四、验证
 
 ```bash
-npm test            # 单元测试：204 个
+npm test            # 单元测试：222 个（含契约护栏与 0.4.7 回归）
 npm run smoke       # 端到端冒烟：沉淀→召回→注入→体检→完成判定→幂等 整条链路
 npm run verify      # 加载验证：mock ctx 执行 apply()，确认工具都能注册、schema 合规
 npm run token-audit # 静态 token 预算审计：常驻/工具定义/SKILL/单次调用产出/真实库命中注入
 ```
 
-测试覆盖面：指纹（含通用基名降权）/ 匹配（含"先验分不得脱离词汇证据"）/ 会话提取 / 存储（含布局、空壳与禁区近重复去重）/ 渲染（含注入裁剪）/ 分类器（含内容闸门与"路径不得当内容"反例）/ 路由契约（含提示段内容护栏）/ 沉淀门槛 / 读缓存 / 查询聚焦 / 路径解析 / 迁移。
+> **受限沙箱里跑测试**：`node --test` 会因无法创建管道而 7 个文件全部 `spawn EPERM`（**0 条用例执行**，
+> 看似"全红"其实一条没跑）。改用 `node --test --experimental-test-isolation=none` —— 实测 222/222 通过。
 
-### 两类专门的回归护栏
+测试覆盖面：指纹（含通用基名降权）/ 匹配（含"先验分不得脱离词汇证据"）/ 会话提取 / 存储（含布局、空壳与禁区近重复去重）/ 渲染（含注入裁剪）/ 分类器（含内容闸门与"路径不得当内容"反例）/ 路由契约（含提示段内容护栏）/ 契约一致性（SKILL 与文档不得与代码漂移）/ 工具层（mock ctx 驱动真工具）/ 沉淀门槛 / 读缓存 / 查询聚焦 / 路径解析 / 迁移。
+
+### 四类专门的回归护栏
 
 **① 路由契约（`tests/routing.test.js`）** —— 把"快速通道必须真正短路"钉死：
 `nextStep` 必填、`implement` 正文必须明文禁止调用 `spec_triage`/`spec_distill`、
@@ -180,6 +183,21 @@ npm run token-audit # 静态 token 预算审计：常驻/工具定义/SKILL/单�
 **② 常驻提示段的内容清单** —— 从 mock 的 `systemPrompt.section` 注册里抽出常驻段真文本，
 断言 `order === 150` 且包含全部必需子串，并反向断言段长上限。
 起因是曾为压缩 token 静默删掉了「报错排查」等 4 条约束——**只比 token 数字看不出这种坏，必须有内容清单回归。**
+
+**③ 契约一致性（`tests/contract.test.js`，0.4.7 新增）** —— 起因：`nextStep` 三态原先手写在
+四处（常驻段 / 工具描述 / SKILL.md / docs），而 SKILL.md 已经漂移成「加按钮/加列 = L1 直通」，
+与 0.4.6 的 `confirm` 判定相反 —— **说明书在反向撤销代码里的修复，当时 204 条测试却全绿**。
+现在常驻段由 `lib/render.js` 的 `ROUTING_CONTRACT` 渲染，本文件断言：
+SKILL.md 必须写明全部三态且不得发明第四态；`原子小改（…）` 的示例必须落在 `L1_EXAMPLES` 白名单内；
+README 配置示例与本文档参数表必须覆盖 `schema` 的**全部**键（README 曾只剩 2 个键，
+照抄示例会把其余 9 项压回默认值）。
+
+**④ 工具层与缺陷回归（`tests/plugin.test.js`、`tests/regression.test.js`，0.4.7 新增）** ——
+工具层此前**零单元测试**，而两次最严重的事故都出在这一层。现在用 mock ctx 驱动 `apply()`
+注册出来的真工具，钉死：写盘失败不得标记「已沉淀」、上一轮未正常结束不得催沉淀、
+home 模式不得自己复制自己、`strictDistill` 关闭后警告必须消失。
+`regression.test.js` 则把五个已修缺陷的触发条件固定下来（复选框叠层、`加列宽` 误判 L3、
+条目提取三处漂移、单个坏文件拖垮整次召回、L2 报告写死与权威表相反的默认值）。
 
 ### 冒烟基线（可作验收参考）
 

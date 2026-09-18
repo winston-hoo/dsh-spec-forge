@@ -23,6 +23,7 @@ import { classifyComplexity, inferQueryCategory } from './lib/classify.js'
 import { rankTemplates } from './lib/match.js'
 import { buildRetroDigest, evaluateRetroEligibility, extractSessionFacts, isSessionComplete } from './lib/extract.js'
 import {
+  bulletLines,
   bumpWriteEpoch,
   collectRedlines,
   copyTree,
@@ -46,6 +47,7 @@ import {
 import {
   SECTIONS,
   renderInjection,
+  renderRoutingLines,
   renderTemplateMarkdown,
   renderTriageReport,
   sectionOf,
@@ -68,7 +70,9 @@ export const schema = Schema.object({
   storageRoot: Schema.string().default('workspace').description('存储模式：workspace 跟当前工作目录（推荐，跨盘时避免 EPERM）/home 放 $DSH_HOME（兼容旧版默认）'),
   retroMinToolCalls: Schema.number().min(0).default(2).description('自动复盘要求的最少工具调用次数，低于此值视为未真正动手'),
   retroRequireCodeChange: Schema.boolean().default(true).description('自动沉淀提醒要求本会话真实改过代码（有 edit/write 类工具调用），纯问答/只读诊断不提醒'),
-  strictDistill: Schema.boolean().default(true).description('提炼提示词时是否强制要求填写禁区，空则报错'),
+  strictDistill: Schema.boolean()
+    .default(true)
+    .description('提炼提示词时若未声明禁区：是否在提示词里插入警告、并回传 missingConstraints=true（模型据此先补问再动手）。关闭后不再警告'),
 })
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
@@ -104,19 +108,15 @@ export function apply(ctx, config) {
       text: [
         '## 需求锻造（spec-forge）',
         '编程需求：先 `spec_recall`（传原文），然后**严格按它返回的 `nextStep` 执行**，不自作主张加步骤。',
-        '- `implement`（`fastTrack=true`）：禁止追问；**不要再调 `spec_triage`/`spec_distill`**（召回正文已替代其产出）；',
-        '  直接实现，疑虑写 `// TODO: [待确认] <内容>`，在最终报告里点出。',
-        '  用户消息含"直接做/速做/不用问/别问/不要问/极速模式" → 无条件 implement。',
-        '- `confirm`（`contentGap` 非空：需求只给了"加个按钮/加个路由"这类容器，没说是什么）：',
-        '  **先用一次 `ask_user_question` 把 `contentGap` 里缺的内容问清**（每题给 2-3 个候选 + 一个推荐默认），',
-        '  拿到回答后直接实现；不要再调 `spec_triage`/`spec_distill`。',
-        '- `triage`（`fastTrack=false`）：再调一次 `spec_triage`，按它给的报告动手 ——',
-        '  L2 按报告默认值执行、禁止追问；L3 完整先问后查。',
+        // 三态路由由 lib/render.js 的 ROUTING_CONTRACT 渲染 —— 唯一事实来源。
+        // 0.4.7 之前这里手写了一份、SKILL.md 又手写了一份，两边已经漂移（SKILL.md 把
+        // 「加按钮/加列」写成 L1 直通，与 0.4.6 的 confirm 相反）。
+        ...renderRoutingLines(),
         '- 可以 `ask_user_question` 的只有三种：`nextStep=confirm`、L3、L2 安全阀；',
         '  提问前禁用任何文件类工具（read/grep/glob/bash/ls），一次问完。',
         '大文件纪律：>20K 字符的文件禁止整文件 read，先 grep 定位再分段读；确需整读先落要点摘要。',
         '收尾过复用价值三问（还会照做/跨项目成立/会反复提）后 `spec_retro` 一次；纯问答、只读诊断、报错排查、',
-        '环境修复、L1 原子小改（改文案/调样式/加按钮/加列）不沉淀；用户明确要求时无条件沉淀。',
+        '环境修复、L1 原子小改不沉淀；用户明确要求时无条件沉淀。',
         '禁区（项目档案/模板注入）是硬约束，不得修改。',
       ].join('\n'),
     })
@@ -361,7 +361,18 @@ export function apply(ctx, config) {
             missingConstraints: { type: 'boolean', required: true },
           },
         },
-        render: (_args, value) => [{ type: 'text', text: value.prompt }],
+        // 0.4.7：missingConstraints 必须在渲染文本里可见。此前 render 只回传 value.prompt，
+        // 而结构字段模型看不到 —— SKILL.md 却写着"若返回 missingConstraints: true 就回第 3 步补问"，
+        // 属于说明书承诺了、实际拿不到的信息（strictDistill 的"空则报错"也是同一处空承诺）。
+        render: (_args, value) => [
+          {
+            type: 'text',
+            text: value.missingConstraints
+              ? '⚠️ missingConstraints=true：本次未声明禁区。**动手前先向用户确认哪些文件/行为不允许改动**，再按下面的提示词执行。\n\n' +
+                value.prompt
+              : value.prompt,
+          },
+        ],
       },
       async execute(args) {
         const constraints = args.constraints ?? []
@@ -393,8 +404,11 @@ export function apply(ctx, config) {
         lines.push('## 硬约束（违反即失败）', '')
         if (constraints.length > 0) {
           for (const c of constraints) lines.push(`- ${c}`)
-        } else {
+        } else if (config.strictDistill) {
           lines.push('- （未提供）**警告：本次未声明禁区。动手前必须向用户确认哪些文件或行为不允许改动。**')
+        } else {
+          // 0.4.7：原来无论 strictDistill 取什么值都插这句警告 —— 关掉开关也不生效。
+          lines.push('- （未提供）')
         }
         lines.push('')
 
@@ -490,12 +504,14 @@ export function apply(ctx, config) {
           category: args.category || 'uncategorized',
           tags: args.tags ?? [],
           trigger: args.trigger || `当用户提出「${args.name}」这类需求时适用。`,
-          clarify: mergeList(existing ? bulletsOf(sectionOf(existing.body, SECTIONS.clarify)) : [], args.clarify ?? []),
+          // 0.4.7：条目提取统一走 store 层的 bulletLines（唯一实现）——
+          // 它会剥掉验收标准的 `[ ]` 前缀，否则覆盖更新会把 `- [ ] x` 叠成 `- [ ] [ ] x`。
+          clarify: mergeList(existing ? bulletLines(sectionOf(existing.body, SECTIONS.clarify)) : [], args.clarify ?? []),
           approach: args.approach ?? [],
           redlines,
           prompt: args.prompt || digest || '',
           acceptance: mergeList(
-            existing ? bulletsOf(sectionOf(existing.body, SECTIONS.acceptance)) : [],
+            existing ? bulletLines(sectionOf(existing.body, SECTIONS.acceptance)) : [],
             args.acceptance ?? []
           ),
           repoName: profile.repoName || cwd,
@@ -539,7 +555,9 @@ export function apply(ctx, config) {
         }
 
         // 禁区写入项目档案，长期生效
-        if (!writeError && args.persistRedlines !== false && hash !== 'global' && redlines.length > 0) {
+        // 0.4.7：去掉 `hash !== 'global'` —— repoHash() 只可能返回 sha 片段或 'no-repo'，
+        // 该条件恒为真，属于"看起来在防护、实际什么也没挡"的死守卫。
+        if (!writeError && args.persistRedlines !== false && redlines.length > 0) {
           try {
             writeProfile(home, hash, {
               repoName: profile.repoName || cwd,
@@ -552,12 +570,10 @@ export function apply(ctx, config) {
           }
         }
 
-        const sessionId = exec?.agent?.session?.id
-        if (sessionId) {
-          state.retroDone.add(sessionId)
-        }
-
         if (writeError) {
+          // 0.4.7：写盘失败时**不能**标记本会话已沉淀。原来这里先 state.retroDone.add()
+          // 再 return，后果是"提醒永久失效"：retroDone 会让后续所有 buildRecallNotice 直接短路，
+          // 用户再也收不到"本会话还没沉淀"的提示，而返回值却说"下次重试"。
           return {
             saved: false,
             id,
@@ -568,13 +584,18 @@ export function apply(ctx, config) {
           }
         }
 
+        const sessionId = exec?.agent?.session?.id
+        if (sessionId) state.retroDone.add(sessionId)
+
         return {
           saved: true,
           id,
           file: saved.file,
           scope,
           updated,
-          preview: digest || buildPreview(args),
+          // 0.4.7：原为 `digest || buildPreview(args)` —— 只要有会话 digest 就非空，
+          // buildPreview 永不执行（死代码）。过程摘要本身就是"本次沉淀内容"最完整的呈现。
+          preview: digest || '(未生成过程摘要)',
         }
       },
     })
@@ -709,22 +730,29 @@ export function apply(ctx, config) {
  */
 function runStoreAction(action, { cwd, move, home, storageMode, logger }) {
   const legacyPath = dataRoot(resolveHome())
-  const crossDrive = isCrossDrive(cwd, legacyPath)
+  // 0.4.7：`home` 模式下数据目录本身就是 `$DSH_HOME/spec-forge`，"旧路径"与当前数据目录是
+  // 同一个目录。原实现照旧扫描、照旧 `copyTree(src, src)`（把目录复制进自己），
+  // migrate 还会执行 bumpWriteEpoch() —— 一次"什么都没做"的迁移却让模板缓存整体失效。
+  // 实测：resolveStorageRoot({storageRoot:'home'}).path === dataRoot(resolveHome()) 为 true。
+  const sameAsLegacy = normalizePath(legacyPath) === normalizePath(home)
+  const crossDrive = !sameAsLegacy && isCrossDrive(cwd, legacyPath)
   const projectHash = repoHash(cwd)
 
   const legacy = { hasData: false, projectCount: 0, globalCount: 0, projectHash }
-  try {
-    const srcProj = join(legacyPath, 'projects', projectHash)
-    const srcGlobal = join(legacyPath, 'global')
-    if (existsSync(srcProj)) legacy.projectCount = listTemplates(legacyPath, projectHash).length
-    if (existsSync(srcGlobal)) legacy.globalCount = listTemplates(legacyPath, 'global').length
-    legacy.hasData = legacy.projectCount + legacy.globalCount > 0
-  } catch (err) {
-    logger?.warn?.(`[spec-forge] 旧路径扫描失败: ${err.message}`)
+  if (!sameAsLegacy) {
+    try {
+      const srcProj = join(legacyPath, 'projects', projectHash)
+      const srcGlobal = join(legacyPath, 'global')
+      if (existsSync(srcProj)) legacy.projectCount = listTemplates(legacyPath, projectHash).length
+      if (existsSync(srcGlobal)) legacy.globalCount = listTemplates(legacyPath, 'global').length
+      legacy.hasData = legacy.projectCount + legacy.globalCount > 0
+    } catch (err) {
+      logger?.warn?.(`[spec-forge] 旧路径扫描失败: ${err.message}`)
+    }
   }
 
   let migration
-  if (action === 'migrate') {
+  if (action === 'migrate' && !sameAsLegacy) {
     const ops = []
     const srcGlobal = join(legacyPath, 'global')
     const srcProj = join(legacyPath, 'projects', projectHash)
@@ -742,20 +770,28 @@ function runStoreAction(action, { cwd, move, home, storageMode, logger }) {
   lines.push(`- 模式：\`${storageMode}\``)
   lines.push(`- 数据目录：\`${home}\``)
   lines.push(`- 当前工作目录：\`${cwd}\``)
-  lines.push(`- 旧路径（$DSH_HOME/spec-forge）：\`${legacyPath}\``)
+  lines.push(
+    sameAsLegacy
+      ? `- 旧路径（$DSH_HOME/spec-forge）：与数据目录是同一个目录（home 模式），不存在独立旧路径`
+      : `- 旧路径（$DSH_HOME/spec-forge）：\`${legacyPath}\``
+  )
   lines.push(`- 当前项目哈希：\`${projectHash}\``)
   if (crossDrive) lines.push('- ⚠️ 检测到跨盘（cwd 与 $DSH_HOME 不同盘）。workspace 模式已规避跨盘写。')
   lines.push('')
   lines.push('### 旧路径数据概览')
   lines.push('')
-  if (legacy.hasData) {
+  if (sameAsLegacy) {
+    lines.push('- 不适用：当前数据目录就是旧路径')
+  } else if (legacy.hasData) {
     lines.push(`- 全局层模板：${legacy.globalCount}`)
     lines.push(`- 当前项目层模板：${legacy.projectCount}`)
   } else {
     lines.push('- 旧路径无数据（global/ 或 projects/<hash> 不存在或为空）')
   }
   lines.push('')
-  if (migration) {
+  if (sameAsLegacy) {
+    lines.push('存储模式为 `home` 时，数据目录即 `$DSH_HOME/spec-forge`，没有独立旧路径可迁移。')
+  } else if (migration) {
     lines.push('### 迁移结果')
     lines.push('')
     lines.push(`- 复制：${migration.copied} 个文件；跳过（目标已存在）：${migration.skipped} 个`)
@@ -780,15 +816,16 @@ function runStoreAction(action, { cwd, move, home, storageMode, logger }) {
   }
 }
 
-function resolveCwd(explicit, exec) {
-  return explicit || exec?.agent?.session?.cwd || exec?.agent?.cwd || process.cwd()
+/** 路径比较用归一化：Windows 大小写不敏感 + 去掉结尾分隔符（用于判断"旧路径"是否就是当前目录） */
+function normalizePath(p) {
+  return String(p ?? '')
+    .replace(/[\\/]+$/, '')
+    .replace(/\//g, '\\')
+    .toLowerCase()
 }
 
-function bulletsOf(section) {
-  return String(section ?? '')
-    .split(/\r?\n/)
-    .map((l) => /^\s*-\s+(.*)$/.exec(l)?.[1]?.trim())
-    .filter((l) => l && !l.startsWith('（'))
+function resolveCwd(explicit, exec) {
+  return explicit || exec?.agent?.session?.cwd || exec?.agent?.cwd || process.cwd()
 }
 
 function mergeList(existing, incoming) {
@@ -818,9 +855,14 @@ function buildRecallNotice(exec, state, config) {
   // 用当前会话事件流实时做门槛判定（第一层硬过滤）：
   // 会话至今改过代码且工具调用达到下限 → 说明有已完成任务可能未沉淀，提示一次。
   const facts = extractSessionFacts(session)
+  // 0.4.7：把 isSessionComplete 真正接上。此前这里只传两个选项，`sessionComplete` 恒为
+  // 默认 true —— "上一轮已完成"这条门槛从未被评估过，任务做到一半也会催沉淀，
+  // 而提示语里那句"已完成的编程任务"是空话（extract.js 的 sessionComplete 形参无人使用）。
+  const completion = isSessionComplete(session)
   const gate = evaluateRetroEligibility(facts, {
     minToolCalls: config.retroMinToolCalls,
     requireCodeChange: config.retroRequireCodeChange,
+    sessionComplete: completion.complete,
   })
   if (!gate.eligible) return ''
   return (
@@ -829,16 +871,6 @@ function buildRecallNotice(exec, state, config) {
     '跨项目成立 / 用户是否会反复提），有复用价值就先调用 `spec_retro` 沉淀成模板，' +
     '再开始本次需求；确无复用价值可忽略并继续。'
   )
-}
-
-function buildPreview(args) {
-  const lines = ['本次沉淀内容：', '']
-  if (args.trigger) lines.push(`- 触发场景：${args.trigger}`)
-  if (args.clarify?.length) lines.push(`- 澄清项 ${args.clarify.length} 条`)
-  if (args.approach?.length) lines.push(`- 改法 ${args.approach.length} 步`)
-  if (args.redlines?.length) lines.push(`- 禁区 ${args.redlines.length} 条`)
-  if (args.acceptance?.length) lines.push(`- 验收标准 ${args.acceptance.length} 条`)
-  return lines.join('\n')
 }
 
 export { extractSessionFacts, isSessionComplete, buildRetroDigest }
