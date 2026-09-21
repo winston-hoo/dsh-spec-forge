@@ -203,7 +203,7 @@ test('classifyComplexity：自包含新建 + 参考物 => L1 fastTrack', () => {
     '参考用户管理页面，新建一个订单列表页面',
     '参考 index.vue 新增一个搜索表单组件',
     '仿照现有的详情页做一个合同详情页',
-    '参照 materials.html 做一个类似的物料页面',
+    '参照 design/materials.html 做一个类似的物料页面',
   ]
   for (const text of cases) {
     const r = classifyComplexity(text)

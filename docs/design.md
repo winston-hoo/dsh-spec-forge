@@ -61,7 +61,7 @@
 
 ### 两个刻意的设计决定
 
-**① 目标文件路径不算内容信号。** 需求常带文件路径前缀（`@…/login/index.vue 登录页加个按钮`），
+**① 目标文件路径不算内容信号。** 需求常带文件路径前缀（`@…/some-page/index.vue 登录页加个按钮`），
 那是"改哪个文件"，不是"按钮做什么"。若把它当内容，真实那条需求会被误放行。
 
 **② 内容闸门不受长度闸门约束。** 长度闸门是"长文本≈多目标"的粗代理，而带长路径前缀的单点需求会被它误伤
@@ -81,7 +81,7 @@ unactionable = tooShort && missing.length >= 2 && !hasAnchor
 | 需求 | tooShort | missing | hasAnchor | 若只降到 L2，安全阀会问吗 |
 | --- | --- | --- | --- | --- |
 | `登录页加个按钮` | true | 3 | false | 会 |
-| `@…/login/index.vue 登录页加个按钮` | **false** | 2 | **true**（识别出文件） | **不会** |
+| `@…/some-page/index.vue 登录页加个按钮` | **false** | 2 | **true**（识别出文件） | **不会** |
 
 带路径前缀 → 变长 + 拿到 file 锚点 → 安全阀根本不触发。**所以"缺内容"必须是独立于长度与锚点的理由。**
 
@@ -125,7 +125,7 @@ unactionable = tooShort && missing.length >= 2 && !hasAnchor
 - **词汇相似度是主项。** 指纹按 token 加权：路径(4) > 技术词(3) > 标识符(2) > 中文 2-gram(1)，
   "改 `index.vue`"比"有个页面"值钱得多。
   **通用基名降权**：`index.vue` / `main.js` / `app.vue` / `package.json` 这类任何项目里都有一堆的基名
-  不再吃满路径权重——否则 `…/login/index.vue` 与 `…/third-party-integration/index.vue` 会共享一个
+  不再吃满路径权重——否则 `…/some-page/index.vue` 与 `…/another-page/index.vue` 会共享一个
   权重 4 的 `index.vue`，看起来像命中了同一条路径。降权只降权重、保留 token，避免误伤"改 index.vue"类真实需求。
 - **查询侧先聚焦再比。** 用户需求常常很长（带路径、叙述、寒暄），直接取 24 个 token 会有一多半是权重 1 的 2-gram，
   稀释余弦与覆盖率。查询指纹先削掉低信号尾巴（强 token 全保留 + 最多 8 个 2-gram）再进打分——

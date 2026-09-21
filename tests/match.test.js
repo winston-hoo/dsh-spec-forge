@@ -219,7 +219,7 @@ test('scoreTemplate：对照——同样的先验条件，只要有词汇交集�
 
 test('回归：只共享通用基名 index.vue 的无关模板不得命中（0.4.5 实测假阳性）', () => {
   // 复刻真实假阳性：需求「…/login/index.vue 登录页加个按钮」命中了
-  // 一份讲「design 设计稿落成 admin 页面」的模板，唯一交集是 index.vue，
+  // 一份讲「设计稿落成 admin 页面」的模板，唯一交集是 index.vue，
   // 旧版靠 w=4 的它 + 先验分拿到 0.372 越过阈值。
   const template = {
     id: 'tpl-cccccccccc',
@@ -228,7 +228,7 @@ test('回归：只共享通用基名 index.vue 的无关模板不得命中（0.4
     fingerprint: [
       { token: 'index.vue', weight: 4 },
       { token: 'materials', weight: 4 },
-      { token: 'src/views/example-admin/materials', weight: 4 },
+      { token: 'src/views/materials/materials', weight: 4 },
     ],
     repo: 'repo1',
     hitCount: 2,

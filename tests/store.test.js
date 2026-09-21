@@ -445,7 +445,7 @@ function readFileContent(file) {
 
 // ---------- 0.4.5：禁区近重复去重 ----------
 
-test('dedupeRedlines：括号说明不同但规则相同的条目会被合并（真实 example-admin 用例）', () => {
+test('dedupeRedlines：括号说明不同但规则相同的条目会被合并（真实用例）', () => {
   const out = dedupeRedlines([
     'package.json 不新增依赖（需要 zip/导出时用浏览器原生 Blob，不引 jszip）',
     'package.json 不新增依赖（项目已登记禁区）',
@@ -454,13 +454,13 @@ test('dedupeRedlines：括号说明不同但规则相同的条目会被合并（
   assert.ok(out[0].includes('不引 jszip'), '应保留信息量更大的那条')
 })
 
-test('dedupeRedlines：改写了语序的近重复条目也会被合并（真实 example-admin 用例）', () => {
+test('dedupeRedlines：改写了语序的近重复条目也会被合并（真实用例）', () => {
   const out = dedupeRedlines([
-    'example-admin/dist 是 git 跟踪的目录，vite build 默认 emptyOutDir 会清空它；验证构建必须显式 --outDir 到临时目录，事后清理；若已误写，用 git checkout HEAD -- example-admin/dist 还原',
-    '验证构建必须显式 --outDir 到临时目录并事后清理；example-admin/dist 是 git 跟踪目录，被误写用 git checkout HEAD -- example-admin/dist 还原',
+    'dist 是 git 跟踪的目录，vite build 默认 emptyOutDir 会清空它；验证构建必须显式 --outDir 到临时目录，事后清理；若已误写，用 git checkout HEAD -- dist 还原',
+    '验证构建必须显式 --outDir 到临时目录并事后清理；dist 是 git 跟踪目录，被误写用 git checkout HEAD -- dist 还原',
   ])
   assert.equal(out.length, 1, '两条是同一规则的不同写法')
-  assert.ok(out[0].startsWith('example-admin/dist'), '应保留更完整的那条')
+  assert.ok(out[0].startsWith('dist'), '应保留更完整的那条')
 })
 
 test('dedupeRedlines：不同规则不得被误合并', () => {
